@@ -36,7 +36,7 @@ datetime(const char *fmt)
         snprintf(buf, sizeof(buf), "^c#ffffff^%.*s%s%s^d^",
                  (int)len_before, tmp, icon, pos + 3);
     } else {
-        strncpy(buf, tmp, sizeof(buf));
+        memcpy(buf, tmp, strlen(tmp) + 1);
     }
 
     return buf;

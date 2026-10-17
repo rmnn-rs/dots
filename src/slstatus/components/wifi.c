@@ -82,7 +82,7 @@ const char *
 nets_status(const char *unused)
 {
     char eth_status[5] = {0};
-    char tun_status[5] = {0};
+//    char tun_status[5] = {0};
     FILE *fp;
 
     /* Ethernet Check (e*) */
@@ -109,6 +109,7 @@ nets_status(const char *unused)
 		int sockfd;
 		struct iwreq wreq;
 
+		memset(id, 0, sizeof(id));
 		memset(&wreq, 0, sizeof(struct iwreq));
 		wreq.u.essid.length = IW_ESSID_MAX_SIZE+1;
 		if (esnprintf(wreq.ifr_name, sizeof(wreq.ifr_name), "%s",

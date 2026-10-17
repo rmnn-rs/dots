@@ -4,7 +4,7 @@
 #include "../util.h"
 
 const char *
-get_wall_info(void)
+get_wall_info(const char *unused)
 {
     static char buf[256];
     char raw[128];

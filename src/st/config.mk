@@ -20,7 +20,7 @@ LIBS = -L$(X11LIB) -lm -lrt -lX11 -lutil -lXft -lXrender\
        `$(PKG_CONFIG) --libs harfbuzz`
 
 # flags
-STCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=600
+STCPPFLAGS = -DVERSION=\"$(VERSION)\" -D_XOPEN_SOURCE=600 -Werror
 STCFLAGS = $(INCS) $(STCPPFLAGS) $(CPPFLAGS) $(CFLAGS)
 STLDFLAGS = $(LIBS) $(LDFLAGS)
 

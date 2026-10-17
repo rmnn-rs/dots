@@ -2941,10 +2941,10 @@ main(int argc, char *argv[])
 		die("pledge");
 #endif /* __OpenBSD__ */
 	scan();
-        spawn_apps();
+//        spawn_apps();
 	run();
 	cleanup();
-        cleanup_apps();
+//        cleanup_apps();
 	XCloseDisplay(dpy);
 	return EXIT_SUCCESS;
 }

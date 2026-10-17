@@ -1,5 +1,7 @@
 /* See LICENSE file for copyright and license details. */
+#define _GNU_SOURCE /* ppoll; drop this if you pass -D_GNU_SOURCE in config.mk */
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,7 +23,7 @@ struct arg {
 };
 
 char buf[1024];
-static volatile sig_atomic_t done;
+static volatile sig_atomic_t done, refresh;
 static Display *dpy;
 
 #include "config.h"
@@ -29,7 +31,9 @@ static Display *dpy;
 static void
 terminate(const int signo)
 {
-    if (signo != SIGUSR1)
+    if (signo == SIGUSR1)
+        refresh = 1;
+    else
         done = 1;
 }
 
@@ -51,9 +55,11 @@ int
 main(int argc, char *argv[])
 {
     struct sigaction act;
-    struct timespec start, current, diff, intspec, wait;
+    struct timespec current, due, wait;
+    sigset_t blk, orig;
+    time_t soon;
     size_t i, len;
-    int sflag, ret;
+    int sflag, ret, force;
     char status[MAXLEN];
     const char *res;
 
@@ -61,6 +67,7 @@ main(int argc, char *argv[])
     ARGBEGIN {
     case 'v':
         die("slstatus-"VERSION);
+	__attribute__((fallthrough));
     case '1':
         done = 1;
         /* FALLTHROUGH */
@@ -81,6 +88,12 @@ main(int argc, char *argv[])
     act.sa_flags |= SA_RESTART;
     sigaction(SIGUSR1, &act, NULL);
 
+    /* signals that wake the sleep; blocked only around the flag check + ppoll */
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGINT);
+    sigaddset(&blk, SIGTERM);
+    sigaddset(&blk, SIGUSR1);
+
     if (!sflag && !(dpy = XOpenDisplay(NULL)))
         die("XOpenDisplay: Failed to open display");
 
@@ -90,17 +103,20 @@ main(int argc, char *argv[])
         memset(args[i].cache, 0, sizeof(args[i].cache));
     }
 
+    force = 0;
     do {
-        if (clock_gettime(CLOCK_MONOTONIC, &start) < 0)
+        /* monotonic: immune to wall-clock jumps, same clock the ppoll timeout
+         * uses. don't use time() here, it's a coarse clock that can lag by a
+         * few ms and would make us wake early and spin */
+        if (clock_gettime(CLOCK_MONOTONIC, &current) < 0)
             die("clock_gettime:");
-
-        time_t now = time(NULL);
+        time_t now = current.tv_sec;
         status[0] = '\0';
         len = 0;
 
         for (i = 0; i < LEN(args); i++) {
-            /* Only call the function if the interval has passed */
-            if (now >= args[i].next_update) {
+            /* Only call the function if the interval has passed (or SIGUSR1 forced a refresh) */
+            if (force || now >= args[i].next_update) {
                 res = args[i].func(args[i].args);
                 if (!res) {
                     res = unknown_str;
@@ -133,20 +149,33 @@ main(int argc, char *argv[])
             XFlush(dpy);
         }
 
-        if (!done) {
+        /* Sleep until the nearest component is due, or a signal arrives.
+         * Signals stay blocked while the flags are checked and ppoll unblocks
+         * them atomically, so a SIGUSR1 can't slip in between check and sleep.
+         * The mask is restored afterwards so popen()'d children don't inherit it. */
+        sigprocmask(SIG_BLOCK, &blk, &orig);
+        if (!done && !refresh) {
+            soon = args[0].next_update;
+            for (i = 1; i < LEN(args); i++)
+                if (args[i].next_update < soon)
+                    soon = args[i].next_update;
+            if (soon <= now)    /* interval 0 would spin otherwise */
+                soon = now + 1;
+
             if (clock_gettime(CLOCK_MONOTONIC, &current) < 0)
                 die("clock_gettime:");
-            difftimespec(&diff, &current, &start);
-
-            intspec.tv_sec = interval / 1000;
-            intspec.tv_nsec = (interval % 1000) * 1E6;
-            difftimespec(&wait, &intspec, &diff);
+            due.tv_sec = soon;
+            due.tv_nsec = 0;
+            difftimespec(&wait, &due, &current);
 
             if (wait.tv_sec >= 0 &&
-                nanosleep(&wait, NULL) < 0 &&
+                ppoll(NULL, 0, &wait, &orig) < 0 &&
                 errno != EINTR)
-                    die("nanosleep:");
+                    die("ppoll:");
         }
+        force = refresh;
+        refresh = 0;
+        sigprocmask(SIG_SETMASK, &orig, NULL);
     } while (!done);
 
     if (!sflag) {

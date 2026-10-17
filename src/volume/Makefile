@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -O3 -march=native -Wall `pkg-config --cflags libnotify`
+CFLAGS  = -O3 -march=native -Wall -Werror `pkg-config --cflags libnotify`
 LIBS    = -lasound `pkg-config --libs libnotify`
 PREFIX  = /usr/local
 SRC     = volume.c

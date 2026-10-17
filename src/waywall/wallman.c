@@ -19,6 +19,11 @@
 
 #include "wall.h"
 
+#define USAGE \
+    "Usage: wallman [-S wayland-N] [-y dur] [-j idx] [-i] <cmd>\n" \
+    "       wallman -D | daemon    (start background daemon)\n" \
+    "Commands: next prev rand save reload fnext fprev\n"
+
 char sock_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static int serv_fd = -1;
 static int slideshow_interval = 0;
@@ -41,32 +46,11 @@ static int fast_utoa(int val, char *buf) {
 }
 
 static int valid_display(const char *d) {
-    long val;
-    if (!d || *d != ':') return 0;
-    d++;
-    if (!isdigit((unsigned char)*d)) return 0;
-    val = 0;
-    while (isdigit((unsigned char)*d)) {
-	int digit = *d - '0';
-      if (val > 65535 / 10) return 0;
-      val = val * 10 + digit;
-      if (val > 65535) return 0;
-        d++;
-    }
-    if (*d == '\0') return 1;
-    if (*d != '.') return 0;
-    d++;
-    if (!isdigit((unsigned char)*d)) return 0;
-    val = 0;
-    while (isdigit((unsigned char)*d)) {
-
-       int digit = *d - '0';
-       if (val > 255 / 10) return 0;
-       val = val * 10 + digit;
-       if (val > 255) return 0;
-        d++;
-    }
-    return *d == '\0';
+    size_t n = 0;
+    if (!d || *d == '\0' || *d == '.') return 0;
+    for (; *d; d++, n++)
+        if (!isalnum((unsigned char)*d) && *d != '-' && *d != '_' && *d != '.') return 0;
+    return n < 64;
 }
 
 /*
@@ -80,9 +64,9 @@ void get_sock_path(char *dest, size_t len, const char *display) {
         exit(1);
     }
 
-    if (!display) display = ":0";
+    if (!display) display = "wayland-0";
     if (!valid_display(display)) {
-        (void)write(STDERR_FILENO, "Error: Invalid DISPLAY value\n", 29);
+        (void)write(STDERR_FILENO, "Error: Invalid WAYLAND_DISPLAY value\n", 37);
         exit(1);
     }
 
@@ -192,14 +176,7 @@ static void landlock_apply(const char *master_dir,
     LL_ALLOW("/lib",     lib_bits);
     LL_ALLOW("/usr/lib", lib_bits);
     LL_ALLOW("/lib64",   lib_bits);
-    LL_ALLOW("/usr/lib/x86_64-linux-gnu/imlib2", lib_bits);
-
-    /* X11 & auth */
-    LL_ALLOW("/tmp/.X11-unix",
-             LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE);
-    LL_ALLOW("/usr/share/X11", LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR);
-    const char *xauth = getenv("XAUTHORITY");
-    if (xauth) LL_ALLOW(xauth, LANDLOCK_ACCESS_FS_READ_FILE);
+    //LL_ALLOW("/usr/lib/x86_64-linux-gnu/imlib2", lib_bits);
 
     /* Wallpaper directory */
     LL_ALLOW(master_dir,
@@ -297,6 +274,10 @@ static void seccomp_apply(void) {
         SC_ALLOW(__NR_lseek),
         SC_ALLOW(__NR_pread64),
 
+        /* Wayland shm buffers (memfd + mmap, fd passed over sendmsg) */
+        SC_ALLOW(__NR_memfd_create),
+        SC_ALLOW(__NR_ftruncate),
+
         /* Memory */
         SC_ALLOW(__NR_mmap),
         SC_ALLOW(__NR_munmap),
@@ -304,7 +285,7 @@ static void seccomp_apply(void) {
         SC_ALLOW(__NR_mremap),      /* Imlib2 */
         SC_ALLOW(__NR_brk),
 
-        /* Sockets — X11 + Unix domain */
+        /* Sockets — Wayland + Unix domain */
         SC_ALLOW(__NR_socket),
         SC_ALLOW(__NR_connect),
         SC_ALLOW(__NR_accept4),
@@ -374,6 +355,7 @@ typedef struct {
     char cmd;
     int  interval;
     int  target;
+//    char path[PATH_MAX];
 } WallMsg;
 
 /* ── Signal handling ──────────────────────────────────────────────────── */
@@ -394,6 +376,11 @@ void run_command(char cmd, int target) {
         case 'u': wall_folder_select(&fwd);break;
         case 'd': wall_folder_select(&bwd);break;
         case 'R': wall_reload(NULL);       break;
+//	case 'f':
+//        if (path && path[0] != '\0') {
+            // Bypass index logic: just set the file directly
+//            run_setter(path);
+//        }
         case 'j':
             if (target > 0 && target <= count) {
                 cur = target - 1;
@@ -416,7 +403,7 @@ static int parse_duration(const char *str) {
 /* ── main ─────────────────────────────────────────────────────────────── */
 
 int main(int argc, char *argv[]) {
-    const char *display   = getenv("DISPLAY");
+    const char *display   = getenv("WAYLAND_DISPLAY");
     int target_interval   = 0;
     int jump_target       = 0;
     int query_mode        = 0;
@@ -434,10 +421,7 @@ int main(int argc, char *argv[]) {
         else if (!strcmp(argv[argi], "-i")) query_mode   = 1;
         else if (!strcmp(argv[argi], "-D")) start_daemon = 1;
         else if (!strcmp(argv[argi], "-h") || !strcmp(argv[argi], "--help")) {
-            (void)write(STDOUT_FILENO,
-                "Usage: wallman [-S :display] [-y dur] [-j idx] [-i] <cmd>\n"
-                "       wallman -D | daemon    (start background daemon)\n"
-                "Commands: next prev rand save reload fnext fprev\n", 120);
+            (void)write(STDOUT_FILENO, USAGE, sizeof(USAGE) - 1);
             return 0;
         } else break;
         argi++;
@@ -446,10 +430,7 @@ int main(int argc, char *argv[]) {
     if (argi < argc && !strcmp(argv[argi], "daemon")) { start_daemon = 1; argi++; }
 
     if (argc == 1) {
-        (void)write(STDOUT_FILENO,
-            "Usage: wallman [-S :display] [-y dur] [-j idx] [-i] <cmd>\n"
-            "       wallman -D | daemon    (start background daemon)\n"
-            "Commands: next prev rand save reload fnext fprev\n", 120);
+        (void)write(STDOUT_FILENO, USAGE, sizeof(USAGE) - 1);
         return 0;
     }
 
@@ -488,6 +469,7 @@ int main(int argc, char *argv[]) {
             else if (!strcmp(arg, "fprev")  || !strcmp(arg, "-d")) msg.cmd = 'd';
             else if (!strcmp(arg, "save")   || !strcmp(arg, "-s")) msg.cmd = 's';
             else if (!strcmp(arg, "reload") || !strcmp(arg, "-R")) msg.cmd = 'R';
+//            else if (!strcmp(arg, "fset")   || !strcmp(arg, "-f")) msg.cmd = 'f';
             else msg.cmd = arg[0];
         }
 
@@ -561,14 +543,18 @@ int main(int argc, char *argv[]) {
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(serv_fd, &fds);
+        int wfd = wall_wl_fd();
+        FD_SET(wfd, &fds);
+        int maxfd = serv_fd > wfd ? serv_fd : wfd;
 
         struct timeval  tv      = { .tv_sec = slideshow_interval, .tv_usec = 0 };
         struct timeval *timeout = (slideshow_interval > 0) ? &tv : NULL;
 
-        int activity = select(serv_fd + 1, &fds, NULL, NULL, timeout);
+        int activity = select(maxfd + 1, &fds, NULL, NULL, timeout);
         if (activity < 0) { if (errno == EINTR) continue; break; }
         if (activity == 0) { run_command(current_mode, 0); continue; }
 
+        if (FD_ISSET(wfd, &fds) && wall_wl_dispatch() < 0) break; /* compositor gone */
         if (!FD_ISSET(serv_fd, &fds)) continue;
 
         int client_fd = accept4(serv_fd, NULL, NULL, SOCK_CLOEXEC);
@@ -584,9 +570,9 @@ int main(int argc, char *argv[]) {
         }
 
         WallMsg m = {0};
+
         if (/*recv(client_fd, &m, sizeof(WallMsg), MSG_WAITALL)*/ recv(client_fd, &m, sizeof(WallMsg), 0) == sizeof(WallMsg)) {
             if (m.cmd == 'i') {
-                /* Build query response with memcpy + fast_utoa */
                 char resp[512];
                 char cur_str[12], tot_str[12];
                 int  clen = fast_utoa(cur + 1, cur_str);
@@ -605,7 +591,8 @@ int main(int argc, char *argv[]) {
                 memcpy(ptr, tot_str, (size_t)tlen);ptr += tlen;
                 (void)write(client_fd, resp, (size_t)(ptr - resp));
 
-            } else if (strchr("nprsmudRj", m.cmd)) {
+            }
+	    else if (strchr("nprsmudRj", m.cmd)) {
                 if (m.interval >= 0)
                     slideshow_interval = (m.interval > 86400) ? 86400 : m.interval;
                 if (strchr("npr", m.cmd))
