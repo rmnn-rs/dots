@@ -12,7 +12,7 @@ X11LIB = /usr/X11R6/lib
 
 # flags
 CPPFLAGS = -I$(X11INC) -D_DEFAULT_SOURCE -DVERSION=\"${VERSION}\"
-CFLAGS   = -std=c99 -pedantic -Wall -Wextra -Wno-unused-parameter -march=native -Os
+CFLAGS   = -std=c99 -pedantic -Wall -Wextra -Wno-unused-parameter -march=native -Os -Werror
 LDFLAGS  = -lmpdclient -L$(X11LIB) -s
 # OpenBSD: add -lsndio
 # FreeBSD: add -lkvm -lsndio

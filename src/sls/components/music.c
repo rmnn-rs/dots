@@ -19,7 +19,7 @@ utf8_char_len(unsigned char c)
 static void
 utf8_window_copy(char *dst, size_t dst_sz, const char *src, int offset)
 {
-    snprintf(dst, dst_sz, "%s", src + offset);
+    snprintf(dst, dst_sz, "%.*s", (int)(dst_sz - 1), src + offset);
     size_t len = strlen(dst);
     if (len == 0)
         return;
@@ -109,7 +109,7 @@ music_status(const char *fmt)
     /* 7. Elapsed/total time */
     unsigned int elapsed = mpd_status_get_elapsed_time(status);
     unsigned int total   = mpd_status_get_total_time(status);
-    char timebuf[16] = "";
+    char timebuf[32] = "";
     if (total > 0)
         snprintf(timebuf, sizeof(timebuf), "%u:%02u/%u:%02u",
                  elapsed / 60, elapsed % 60,
@@ -122,15 +122,13 @@ music_status(const char *fmt)
             offset = 0;
         utf8_window_copy(window, sizeof(window), title, offset);
         if (state == MPD_STATE_PLAY) {
-            /* window reached the end of the title: wrap. offset may overshoot
-             * max_offset on multibyte titles so the last char still gets shown */
             if (offset >= max_offset)
                 offset = 0;
             else
                 offset += utf8_char_len((unsigned char)title[offset]);
         }
     } else {
-        snprintf(window, sizeof(window), "%s", title);
+        snprintf(window, sizeof(window), "%.*s", MAX_VISIBLE, title);
     }
 
     /* 9. Order-dependent output assembly */

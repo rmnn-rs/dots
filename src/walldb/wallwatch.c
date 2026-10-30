@@ -131,7 +131,7 @@ static void process_batch(void (*notify)(void)) {
             walldb_prune(root);
         } else if (!warned_empty) {
             warned_empty = 1;
-            fputs("wallwatch: library not imported yet, run 'wallman scan' once (the watcher takes over after that)\n", stderr);
+            fputs("wallwatch: library not imported yet, run 'wallman --scan' once (the watcher takes over after that)\n", stderr);
         }
     }
 
@@ -187,6 +187,12 @@ pid_t wallwatch_start(const char *root_in, const char *db_base, void (*notify)(v
     root[n] = '\0';
     rootlen = n;
     memcpy(dbbase, db_base, bl + 1);
+
+    char dbfile[PATH_MAX + 4];                                   /* an old database gets its positions numbered right away */
+    memcpy(dbfile, dbbase, bl);
+    memcpy(dbfile + bl, ".db", 4);
+    if (access(dbfile, F_OK) == 0) walldb_open_rw(dbbase);
+
     rewatch();
     loop(notify);
     _exit(0);

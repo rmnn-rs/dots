@@ -5,11 +5,12 @@
 
 /*
  * Wallpaper library database (<base>.db). Rows are keyed by path relative to
- * the master dir and carry a display name, one category ("A/B" nests under
- * "A"), a purity (0 unrated, 1 SFW, 2 Sketchy, 3 NSFW) and any number of tags.
+ * the master dir and carry a display name, one category, a purity (0 unrated,
+ * 1 SFW, 2 Sketchy, 3 NSFW) and any number of tags. A category is just an exact
+ * name: "Anime/Eva" is a category of its own, not a child of "Anime".
  *
  * Views: "*" everything rated, "?" inbox (unrated or no category),
- * "Category" (includes sub-categories), "@tag" (includes "tag/..." children).
+ * "Category" (exactly that category), "@tag" (includes "tag/..." children).
  */
 
 /* ── Daemon side (read-only, no writes, no sleeping) ───────────────────── */
@@ -29,11 +30,13 @@ int  walldb_scan(const char *root, const char *const *tiers, int ntiers, int *sk
 int  walldb_info(const char *path);                         /* prints the row to stdout */
 int  walldb_rate(const char *path, int purity);             /* 0..3 */
 int  walldb_rate_view(const char *view, int purity);        /* everything in a Category or @tag; returns rows changed */
+int  walldb_move(const char *path, const char *spec);        /* move a wallpaper inside its category: "12", "+3", "-2", "first", "last".
+                                                               Returns the new position, -1 on a bad request, -2 when it has no category */
 int  walldb_set_category(const char *path, const char *cat);/* "" or "-" clears */
 int  walldb_set_category_folder(const char *folder, const char *cat, int level, int *rated);
                                                             /* every file under a physical folder ("." = all); rows changed.
                                                                level 1..3 also rates the *unrated* ones (*rated = how many) */
-int  walldb_clear_category(const char *cat);                  /* remove a category (and its sub-categories) from every wallpaper; rows changed */
+int  walldb_clear_category(const char *cat);                  /* remove a category from every wallpaper that has it; rows changed */
 int  walldb_unrated(const char *cat);                         /* unrated rows in a category (NULL = whole library) */
 int  walldb_exists(const char *path);                        /* is this relative path in the database? */
 int  walldb_print_cats(void);                               /* "category<TAB>total<TAB>unrated" per category; returns rows, -1 on error */

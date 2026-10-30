@@ -82,7 +82,7 @@ const char *
 nets_status(const char *unused)
 {
     char eth_status[5] = {0};
-    char tun_status[5] = {0};
+//    char tun_status[5] = {0};
     FILE *fp;
 
     /* Ethernet Check (e*) */

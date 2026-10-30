@@ -12,7 +12,7 @@ GEN_H = wlr-layer-shell-unstable-v1-client-protocol.h
 GEN_C = wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c
 
 TARGET = waywall
-SRC = wallman.c wall.c walldb.c $(GEN_C)
+SRC = wallman.c wall.c walldb.c wallwatch.c $(GEN_C)
 OBJ = $(SRC:.c=.o)
 
 all: $(TARGET)

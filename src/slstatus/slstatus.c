@@ -1,6 +1,7 @@
 /* See LICENSE file for copyright and license details. */
 #define _GNU_SOURCE /* ppoll; drop this if you pass -D_GNU_SOURCE in config.mk */
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -17,10 +18,22 @@ struct arg {
     const char *(*func)(const char *);
     const char *fmt;
     const char *args;
-    const int interval;    /* Interval in seconds */
+    const int interval;    /* Interval in seconds, 0 = only on SIGUSR1 */
     char cache[256];        /* Stores the last successful result */
     time_t next_update;    /* Timestamp for the next permitted run */
 };
+
+/* a pollable event source (netlink socket, timerfd, MPD idle connection, ...) */
+struct evsrc {
+    int (*init)(void);      /* returns a pollable fd, or -1 */
+    int (*drain)(int fd);   /* eat what is pending: >0 refresh funcs, 0 ignore, <0 source died
+                             * (funcs refresh too; drain has already closed the fd) */
+    const char *(*funcs[4])(const char *);  /* components to refresh on an event */
+    int fd;
+};
+
+#define NEVER ((time_t)LONG_MAX)    /* next_update of an interval 0 component */
+#define EVRETRY 5                   /* seconds between re-init attempts of a dead source */
 
 char buf[1024];
 static volatile sig_atomic_t done, refresh;
@@ -35,6 +48,18 @@ terminate(const int signo)
         refresh = 1;
     else
         done = 1;
+}
+
+/* make every component an event source feeds due right now */
+static void
+fire(const struct evsrc *e)
+{
+    size_t i, j;
+
+    for (i = 0; i < LEN(args); i++)
+        for (j = 0; j < LEN(e->funcs) && e->funcs[j]; j++)
+            if (args[i].func == e->funcs[j])
+                args[i].next_update = 0;
 }
 
 static void
@@ -55,12 +80,13 @@ int
 main(int argc, char *argv[])
 {
     struct sigaction act;
-    struct timespec current, due, wait;
+    struct timespec current, due, wait, *timeout;
+    struct pollfd pfd[LEN(evsrcs)];
     sigset_t blk, orig;
     time_t soon;
     size_t i, len;
-    int sflag, ret, force;
-    char status[MAXLEN];
+    int sflag, ret, force, first, changed, n;
+    char status[MAXLEN], last[MAXLEN];
     const char *res;
 
     sflag = 0;
@@ -102,8 +128,11 @@ main(int argc, char *argv[])
         args[i].next_update = 0;
         memset(args[i].cache, 0, sizeof(args[i].cache));
     }
+    for (i = 0; i < LEN(evsrcs); i++)
+        evsrcs[i].fd = -1;
 
     force = 0;
+    first = 1;
     do {
         /* monotonic: immune to wall-clock jumps, same clock the ppoll timeout
          * uses. don't use time() here, it's a coarse clock that can lag by a
@@ -113,6 +142,11 @@ main(int argc, char *argv[])
         time_t now = current.tv_sec;
         status[0] = '\0';
         len = 0;
+
+        /* (re)open dead sources; whatever they feed may have changed meanwhile */
+        for (i = 0; i < LEN(evsrcs) && !done; i++)
+            if (evsrcs[i].fd < 0 && (evsrcs[i].fd = evsrcs[i].init()) >= 0)
+                fire(&evsrcs[i]);
 
         for (i = 0; i < LEN(args); i++) {
             /* Only call the function if the interval has passed (or SIGUSR1 forced a refresh) */
@@ -127,7 +161,8 @@ main(int argc, char *argv[])
                 snprintf(args[i].cache, sizeof(args[i].cache), "%s", res);
             }
                 args[i].cache[sizeof(args[i].cache) - 1] = '\0';
-                args[i].next_update = now + args[i].interval;
+                args[i].next_update = args[i].interval ?
+                                      now + args[i].interval : NEVER;
             }
 
             /* Build the status string using the cached value */
@@ -138,12 +173,20 @@ main(int argc, char *argv[])
             len += ret;
         }
 
-        if (sflag) {
+        /* dwm re-parses and repaints the bar on every root name change,
+         * so don't write a string that is identical to the last one */
+        changed = first || strcmp(status, last);
+        if (changed) {
+            memcpy(last, status, strlen(status) + 1);
+            first = 0;
+        }
+
+        if (changed && sflag) {
             puts(status);
             fflush(stdout);
             if (ferror(stdout))
                 die("puts:");
-        } else {
+        } else if (changed) {
             if (XStoreName(dpy, DefaultRootWindow(dpy), status) < 0)
                 die("XStoreName: Allocation failed");
             XFlush(dpy);
@@ -159,19 +202,43 @@ main(int argc, char *argv[])
             for (i = 1; i < LEN(args); i++)
                 if (args[i].next_update < soon)
                     soon = args[i].next_update;
-            if (soon <= now)    /* interval 0 would spin otherwise */
-                soon = now + 1;
+            for (i = 0; i < LEN(evsrcs); i++) {
+                pfd[i].fd = evsrcs[i].fd;   /* fd < 0 is ignored by ppoll */
+                pfd[i].events = POLLIN;
+                pfd[i].revents = 0;
+                /* a dead source gets retried, don't sleep forever on it */
+                if (evsrcs[i].fd < 0 && now + EVRETRY < soon)
+                    soon = now + EVRETRY;
+            }
 
-            if (clock_gettime(CLOCK_MONOTONIC, &current) < 0)
-                die("clock_gettime:");
-            due.tv_sec = soon;
-            due.tv_nsec = 0;
-            difftimespec(&wait, &due, &current);
+            timeout = NULL;     /* all event-only: sleep until a signal or an fd */
+            if (soon != NEVER) {
+                if (clock_gettime(CLOCK_MONOTONIC, &current) < 0)
+                    die("clock_gettime:");
+                due.tv_sec = soon;
+                due.tv_nsec = 0;
+                difftimespec(&wait, &due, &current);
+                timeout = &wait;
+            }
 
-            if (wait.tv_sec >= 0 &&
-                ppoll(NULL, 0, &wait, &orig) < 0 &&
-                errno != EINTR)
+            n = 0;
+            if ((!timeout || timeout->tv_sec >= 0) &&
+                (n = ppoll(pfd, LEN(pfd), timeout, &orig)) < 0) {
+                if (errno != EINTR)
                     die("ppoll:");
+                n = 0;
+            }
+
+            for (i = 0; n > 0 && i < LEN(evsrcs); i++) {
+                if (!pfd[i].revents)
+                    continue;
+                /* also on POLLHUP/POLLERR: the read fails and the source reports itself dead */
+                ret = evsrcs[i].drain(evsrcs[i].fd);
+                if (ret)    /* an event, or the source died: either way what it feeds may be stale */
+                    fire(&evsrcs[i]);
+                if (ret < 0)
+                    evsrcs[i].fd = -1;
+            }
         }
         force = refresh;
         refresh = 0;

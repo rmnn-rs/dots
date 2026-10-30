@@ -1,5 +1,5 @@
 PREFIX = /usr/local
-CFLAGS = -std=gnu11 -Wall -Wextra -Os -Werror
+CFLAGS = -std=gnu11 -Wall -Wextra -Os -pedantic -Werror
 
 cerberus: cerberus.c config.h
 	$(CC) $(CFLAGS) -o $@ cerberus.c $(LDFLAGS)

@@ -1,18 +1,15 @@
-/* apps run by autostart: argv (NULL terminated), restart delay in seconds.
- * delay -1 = run once, delay >= 0 = restart that many seconds after it exits.
- * The table ends with { {NULL}, 0 }. */
+
+/* apps run by autostart: argv (NULL terminated), restart delay in seconds. */
 static const AppConfig apps[] = {
-    /* command                                               | delay (-1 = once) */
-    { {"/usr/bin/xset", "b", "off", NULL},                      -1 },
-    { {"xset", "r", "rate", "200", "50", NULL},                 -1 },
-    { {"picom", NULL},                                           5 },
-//  { {"bar", NULL},                                             2 },
-    { {"slstatus", NULL},                                        2 },
-    { {"dunst", NULL},                                           5 },
-    { {"unclutter", "--timeout", "5", NULL},                     3 },
-    { {"wallman", "-D", NULL},                                   2 },
-    { {"bat-notify", NULL},                                      3 },
-    { {"dbus-update-activation-environment", "--all", NULL},    -1 },
-    { {NULL},                                                    0 }
+    { .command = {"/usr/bin/xset", "b", "off", NULL},                      .restart_delay = -1 },
+    { .command = {"xset", "r", "rate", "200", "50", NULL},                 .restart_delay = -1 },
+    { .command = {"picom", NULL},                                           .restart_delay = 5 },
+    { .command = {"slstatus", NULL},                                        .restart_delay = 2 },
+    { .command = {"dunst", NULL},                                           .restart_delay = 5 },
+    { .command = {"unclutter", "--timeout", "5", NULL},                     .restart_delay = 3 },
+    { .command = {"wallman", "-D", NULL},                                   .restart_delay = 2 },
+    { .command = {"bat-notify", NULL},                                      .restart_delay = 3 },
+    { .command = {"dbus-update-activation-environment", "--all", NULL},    .restart_delay = -1 },
+    { .command = {NULL},                                                    .restart_delay = 0 }
 };
 

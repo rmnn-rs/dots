@@ -41,6 +41,20 @@ static mode_t old_umask;
 
 static void onsig(int s) { (void)s; running = 0; }
 
+/* Asynchronously reaps any terminated watchdogs to completely prevent zombies */
+static void reap_zombies(void) {
+    pid_t pid;
+    int status;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (int i = 0; i < w_count; i++) {
+            if (watchdogs[i] == pid) {
+                watchdogs[i] = 0;
+                break;
+            }
+        }
+    }
+}
+
 /* ── IPC / Socket Helpers ────────────────────────────────────────────── */
 
 static int fast_utoa(int val, char *buf) {
@@ -117,11 +131,6 @@ static void start_watchdog(const AppConfig *app, int slot_idx) {
     }
 
     if (wpid == 0) {
-        /*
-         * Create a new process group for the watchdog and child app.
-         * Ignore SIGINT and SIGTERM so Ctrl+C in terminal doesn't kill watchdog
-         * before the parent supervisor can cleanly tear it down.
-         */
         setpgid(0, 0);
         signal(SIGINT, SIG_IGN);
         signal(SIGTERM, SIG_IGN);
@@ -136,13 +145,13 @@ static void start_watchdog(const AppConfig *app, int slot_idx) {
             pid_t app_pid = fork();
 
             if (app_pid == 0) {
-                /* Reset default signals for actual application */
                 signal(SIGINT, SIG_DFL);
                 signal(SIGTERM, SIG_DFL);
                 signal(SIGPIPE, SIG_DFL);
                 umask(old_umask);
-                prctl(PR_SET_PDEATHSIG, SIGTERM);   /* watchdog gone -> app goes too */
-                execvp(app->command[0], app->command);
+                prctl(PR_SET_PDEATHSIG, SIGTERM);
+
+                execvp(app->command[0], (char *const *)app->command);
                 _exit(1);
 
             } else if (app_pid > 0) {
@@ -165,12 +174,10 @@ static void start_watchdog(const AppConfig *app, int slot_idx) {
                         else _exit(0);
                     }
                 }
-
             } else {
                 _exit(1);
             }
         }
-
     } else {
         watchdogs[slot_idx] = wpid;
     }
@@ -191,14 +198,19 @@ static void spawn_apps(void) {
 static void stop_watchdog(int idx) {
     if (idx < 0 || idx >= w_count || watchdogs[idx] <= 0) return;
 
-    /* Send SIGKILL directly to watchdog and its process group */
     kill(-watchdogs[idx], SIGKILL);
     kill(watchdogs[idx], SIGKILL);
-    waitpid(watchdogs[idx], NULL, 0);
+
+    // Use a non-blocking loop with a slight fallback timeout to prevent hanging the event loop
+    int status;
+    for (int retry = 0; retry < 1000; retry++) {
+        pid_t r = waitpid(watchdogs[idx], &status, WNOHANG);
+        if (r == watchdogs[idx] || (r < 0 && errno == ECHILD)) break;
+        usleep(500);
+    }
     watchdogs[idx] = 0;
 }
 
-/* Ask the app to exit (the watchdog ignores TERM, so only the app sees it). */
 static void term_watchdog(int idx) {
     if (idx < 0 || idx >= w_count || watchdogs[idx] <= 0) return;
     kill(-watchdogs[idx], SIGTERM);
@@ -248,6 +260,8 @@ static void handle_ipc_cmd(StarterMsg m, int client_fd) {
             spawn_apps();
         }
     } else if (m.cmd == 's') {
+        // Clean out any finished single-run or dead processes right before building status report
+        reap_zombies();
         char resp[1024];
         int pos = snprintf(resp, sizeof(resp), "Active Watchdogs: %d/%d\n", w_count, MAX_WATCHDOGS);
         for (int i = 0; i < w_count && pos < (int)sizeof(resp); i++) {
@@ -302,105 +316,87 @@ int main(int argc, char *argv[]) {
                 fputs(buf, stdout);
             }
         }
-        close(fd);
-        return 0;
+	close(fd);
+	return 0;
     }
-
     /* Daemon Mode Initialization */
     pid_t ppid = getppid();
-
     for (int s = 1; s < NSIG; s++)
-        signal(s, SIG_DFL);
-    signal(SIGPIPE, SIG_IGN);           /* client hung up mid-reply must not kill us */
-
-    struct sigaction sa = { .sa_handler = onsig };  /* no SA_RESTART: pselect must see EINTR */
+	    signal(s, SIG_DFL);
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction sa = { .sa_handler = onsig };
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
-
     sigemptyset(&sigs);
     sigaddset(&sigs, SIGTERM);
     sigaddset(&sigs, SIGINT);
     sigaddset(&sigs, SIGHUP);
+    sigaddset(&sigs, SIGCHLD); // Add SIGCHLD to safely interrupt pselect when children complete
     sigprocmask(SIG_BLOCK, &sigs, NULL);
-
     prctl(PR_SET_PDEATHSIG, SIGTERM);
     if (getppid() != ppid)
-        return 0;
-
+	    return 0;
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
-
-    /* Setup Socket Path */
     get_sock_path(sock_path, sizeof(sock_path), display);
-
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
     size_t slen = strlen(sock_path);
     memcpy(addr.sun_path, sock_path, slen + 1);
-
-    /* Single Instance Check */
     int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (probe_fd >= 0) {
-        if (connect(probe_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-            fprintf(stderr, "Cerberus: already running on display %s\n", display ? display : ":0");
-            close(probe_fd);
-            return 1;
-        }
-        close(probe_fd);
+	    if (connect(probe_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+		    fprintf(stderr, "Cerberus: already running on display %s\n", display ? display : ":0");
+		    close(probe_fd);
+		    return 1;
+	    }
+	    close(probe_fd);
     }
-
     unlink(sock_path);
     serv_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (serv_fd < 0) return 1;
     fcntl(serv_fd, F_SETFD, FD_CLOEXEC);
-
     old_umask = umask(0077);
     if (bind(serv_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
-        listen(serv_fd, 5) < 0) {
-        close(serv_fd);
-        return 1;
+		    listen(serv_fd, 5) < 0) {
+	    close(serv_fd);
+	    return 1;
     }
-
     spawn_apps();
-
     sigset_t empty_mask;
     sigemptyset(&empty_mask);
-
     /* Event Loop */
     while (running) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(serv_fd, &fds);
-
-        struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-
-        int activity = pselect(serv_fd + 1, &fds, NULL, NULL, &ts, &empty_mask);
-
-        if (activity < 0)
-            continue;
-
-        if (activity > 0 && FD_ISSET(serv_fd, &fds)) {
-            int client_fd = accept4(serv_fd, NULL, NULL, SOCK_CLOEXEC);
-            if (client_fd < 0) continue;
-
-            struct timeval tv = { .tv_sec = 1 };
-            setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-            struct ucred cred;
-            socklen_t ulen = sizeof(cred);
-            if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &ulen) == 0 &&
-                cred.uid == getuid()) {
-                StarterMsg m = {0};
-                if (read(client_fd, &m, sizeof(m)) == sizeof(m)) {
-                    handle_ipc_cmd(m, client_fd);
-                }
-            }
-
-            shutdown(client_fd, SHUT_WR);
-            close(client_fd);
-        }
+	    // Sweep dead watchdogs every single loop iteration
+	    reap_zombies();
+	    fd_set fds;
+	    FD_ZERO(&fds);
+	    FD_SET(serv_fd, &fds);
+	    struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
+	    // empty_mask temporarily unblocks SIGCHLD, SIGINT, SIGTERM during wait window
+	    int activity = pselect(serv_fd + 1, &fds, NULL, NULL, &ts, &empty_mask);
+	    if (activity < 0) {
+		    // Signal hit, re-verify loop conditions
+		    continue;
+	    }
+	    if (activity > 0 && FD_ISSET(serv_fd, &fds)) {
+		    int client_fd = accept4(serv_fd, NULL, NULL, SOCK_CLOEXEC);
+		    if (client_fd < 0) continue;
+		    struct timeval tv = { .tv_sec = 1 };
+		    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+		    struct ucred cred;
+		    socklen_t ulen = sizeof(cred);
+		    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &ulen) == 0 &&
+				    cred.uid == getuid()) {
+			    StarterMsg m = {0};
+			    if (read(client_fd, &m, sizeof(m)) == sizeof(m)) {
+				    handle_ipc_cmd(m, client_fd);
+			    }
+		    }
+		    shutdown(client_fd, SHUT_WR);
+		    close(client_fd);
+	    }
     }
-
     cleanup_apps();
     close(serv_fd);
     unlink(sock_path);

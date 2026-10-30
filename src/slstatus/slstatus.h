@@ -90,3 +90,9 @@ const char *bri_perc(const char *unused);
 const char *get_wall_info(const char *unused);
 const char *music_status(const char *unused);
 
+int ev_minute_init(void); int ev_minute_drain(int fd);
+int ev_uevent_init(void); int ev_uevent_drain(int fd);
+int ev_link_init(void);   int ev_link_drain(int fd);
+int ev_mpd_init(void);    int ev_mpd_drain(int fd);
+int ev_wall_init(void);    int ev_wall_drain(int fd);
+

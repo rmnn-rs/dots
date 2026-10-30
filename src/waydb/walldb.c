@@ -20,27 +20,32 @@ static const char SCHEMA[] =
     "  path     TEXT PRIMARY KEY NOT NULL,"       /* relative to the master dir */
     "  name     TEXT NOT NULL,"
     "  category TEXT NOT NULL DEFAULT '',"
-    "  purity   INTEGER NOT NULL DEFAULT 0);"
+    "  purity   INTEGER NOT NULL DEFAULT 0,"
+    "  pos      INTEGER);"                           /* place inside its category, 1..N; NULL without a category */
     "CREATE TABLE IF NOT EXISTS tag("
     "  path TEXT NOT NULL REFERENCES wall(path) ON DELETE CASCADE ON UPDATE CASCADE,"
     "  tag  TEXT NOT NULL,"
     "  PRIMARY KEY(path, tag));"
+    "CREATE TABLE IF NOT EXISTS tier(folder TEXT PRIMARY KEY NOT NULL, level INTEGER NOT NULL);"
     "CREATE INDEX IF NOT EXISTS wall_by_category ON wall(category);"
     "CREATE INDEX IF NOT EXISTS tag_by_tag ON tag(tag, path);";
 
 /* ?1 = max purity, ?2 = category / tag. 'x/' <= c < 'x0' is the index-friendly "starts with x/" */
 #define ORDER " ORDER BY name COLLATE NATSORT, path LIMIT 10000"
+#define ORDER_POS " ORDER BY pos, name COLLATE NATSORT, path LIMIT 10000"
 
 static const char Q_ALL[] =
     "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1" ORDER;
 static const char Q_INBOX[] =
     "SELECT path FROM wall WHERE purity <= ?1 AND (purity = 0 OR category = '')" ORDER;
-#define IN_CAT "(category = ?2 OR (category >= ?2 || '/' AND category < ?2 || '0'))"
+#define IN_CAT "category = ?2"
 /* a physical folder (path prefix); "." means the whole library */
 #define IN_FOLDER "(?2 = '.' OR (path >= ?2 || '/' AND path < ?2 || '0'))"
 #define IN_TAG "path IN (SELECT path FROM tag WHERE tag = ?2 OR (tag >= ?2 || '/' AND tag < ?2 || '0'))"
 
-static const char Q_CAT[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_CAT ORDER;
+static const char Q_CAT[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_CAT ORDER_POS;
+/* a database from before positions existed, until the first write migrates it */
+static const char Q_CAT_OLD[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_CAT ORDER;
 static const char Q_TAG[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_TAG ORDER;
 static const char Q_VIEWS[] =
     "SELECT DISTINCT category FROM wall WHERE category <> '' AND purity BETWEEN 1 AND ?1 "
@@ -99,6 +104,26 @@ static void run(const char *sql, const char *arg, struct vec *a) {
     sqlite3_finalize(st);
 }
 
+/* One number out of a query: ?1 is the allowed purity, ?2 an optional text argument */
+static int scalar(const char *sql, const char *arg) {
+    sqlite3_stmt *st;
+    int n = -1;
+    if (db && sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int(st, 1, purity);
+        if (arg) sqlite3_bind_text(st, 2, arg, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    return n;
+}
+
+static int have_pos(void) {
+    return scalar("SELECT count(*) FROM pragma_table_info('wall') WHERE name = 'pos'", NULL) > 0;
+}
+
+static int normalize(void);
+static int txn(const char *sql);
+
 static int open_db(const char *base, int flags) {
     if (db) return 0;
     char path[PATH_MAX];
@@ -140,22 +165,24 @@ int walldb_list(const char *view, char ***out) {
     if (!view || !view[0] || !strcmp(view, "*")) run(Q_ALL,   NULL,     &a);
     else if (!strcmp(view, "?"))                 run(Q_INBOX, NULL,     &a);
     else if (view[0] == '@')                     run(Q_TAG,   view + 1, &a);
-    else                                         run(Q_CAT,   view,     &a);
+    else                                         run(have_pos() ? Q_CAT : Q_CAT_OLD, view, &a);
     *out = a.v;
     return a.n;
 }
 
 int walldb_next_view(const char *cur, int dir, char *out, size_t outsz) {
     struct vec a = {0};
-    push(&a, "*");
-    push(&a, "?");
+    /* only views with something to show: an empty one would just fall back to "*" and look like nothing happened */
+    if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE purity BETWEEN 1 AND ?1)", NULL) > 0) push(&a, "*");
+    if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE purity <= ?1 AND (purity = 0 OR category = ''))", NULL) > 0) push(&a, "?");
     run(Q_VIEWS, NULL, &a);
 
-    int i = 0, rc = -1;
+    int i = -1, rc = -1;
     for (int k = 0; k < a.n; k++)
         if (cur && !strcmp(a.v[k], cur)) i = k;
+    if (i < 0) i = dir > 0 ? -1 : 0;                        /* the current view isn't in the cycle (any more): start from an end */
     if (a.n > 0) {
-        const char *next = a.v[(i + dir % a.n + a.n) % a.n];
+        const char *next = a.v[((i + dir) % a.n + a.n) % a.n];
         size_t len = strlen(next);
         if (len < outsz) { memcpy(out, next, len + 1); rc = 0; }
     }
@@ -170,6 +197,18 @@ int walldb_open_rw(const char *base) {
     sqlite3_busy_timeout(db, 5000);
     if (sqlite3_exec(db, SCHEMA, NULL, NULL, NULL) != SQLITE_OK) {
         fprintf(stderr, "walldb: schema: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    /* a database from before positions: add the column, then number every category in its current order */
+    if ((!have_pos() && sqlite3_exec(db, "ALTER TABLE wall ADD COLUMN pos INTEGER", NULL, NULL, NULL) != SQLITE_OK) ||
+        sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS wall_by_pos ON wall(category, pos)", NULL, NULL, NULL) != SQLITE_OK ||
+        txn("BEGIN") < 0) {
+        fprintf(stderr, "walldb: migrating positions: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    if (normalize() < 0 || txn("COMMIT") < 0) {
+        txn("ROLLBACK");
+        fputs("walldb: could not number the positions\n", stderr);
         return -1;
     }
     return 0;
@@ -190,6 +229,47 @@ static int write_sql(const char *sql, const char *a, const char *b) {
 
 static int txn(const char *sql) {
     return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
+}
+
+/* Number a category 1..N in the order it already has; wallpapers without a position go last, by name */
+static int renumber(const char *cat) {
+    struct vec a = {0};
+    run("SELECT path FROM wall WHERE category = ?2 ORDER BY pos IS NULL, pos, name COLLATE NATSORT, path", cat, &a);
+    sqlite3_stmt *st;
+    int rc = sqlite3_prepare_v2(db, "UPDATE wall SET pos = ?1 WHERE path = ?2 AND pos IS NOT ?1", -1, &st, NULL) == SQLITE_OK ? 0 : -1;
+    for (int i = 0; rc == 0 && i < a.n; i++) {
+        sqlite3_reset(st);
+        sqlite3_bind_int(st, 1, i + 1);
+        sqlite3_bind_text(st, 2, a.v[i], -1, SQLITE_STATIC);
+        if (sqlite3_step(st) != SQLITE_DONE) rc = -1;
+    }
+    sqlite3_finalize(st);
+    vec_free(&a);
+    return rc;
+}
+
+/* Positions inside a category are exactly 1..N. Anything that moves wallpapers in or out of a category (or a
+ * hand-written UPDATE) can break that, so every such write ends here: wallpapers without a category lose their
+ * position and any category that is not dense is renumbered. Idempotent, and cheap when nothing is off.
+ * Call inside a transaction. */
+static int normalize(void) {
+    if (write_sql("UPDATE wall SET pos = NULL WHERE category = '' AND pos IS NOT NULL", "", NULL) < 0) return -1;
+    struct vec bad = {0};
+    run("SELECT category FROM wall WHERE category <> '' GROUP BY category "
+        "HAVING count(pos) <> count(*) OR count(DISTINCT pos) <> count(*) OR min(pos) <> 1 OR max(pos) <> count(*)", NULL, &bad);
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < bad.n; i++) rc = renumber(bad.v[i]);
+    vec_free(&bad);
+    return rc;
+}
+
+/* write_sql for changes that move wallpapers between categories: the change and the renumbering are one transaction */
+static int write_norm(const char *sql, const char *a, const char *b) {
+    if (txn("BEGIN") < 0) return -1;
+    int rc = write_sql(sql, a, b);
+    int ok = rc >= 0 && normalize() == 0 && txn("COMMIT") == 0;
+    if (!ok) { txn("ROLLBACK"); return -1; }
+    return rc;
 }
 
 int walldb_level(const char *s) {
@@ -228,10 +308,84 @@ static int clean_category(const char *cat, char *buf, size_t sz) {
     return (n && bad_name(buf)) ? -1 : 0;
 }
 
+/* ?1 text, ?2 and ?3 integers */
+static int exec_i(const char *sql, const char *s, int a, int b) {
+    sqlite3_stmt *st;
+    int rc = -1;
+    if (db && sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, s, -1, SQLITE_STATIC);
+        sqlite3_bind_int(st, 2, a);
+        sqlite3_bind_int(st, 3, b);
+        if (sqlite3_step(st) == SQLITE_DONE) rc = sqlite3_changes(db);
+        sqlite3_finalize(st);
+    }
+    return rc;
+}
+
+/* "12" absolute, "+3" / "-2" relative, "first", "last"; clamped to 1..n. -1 if it isn't one of those */
+static int target_pos(const char *spec, int cur, int n) {
+    if (!strcmp(spec, "first")) return 1;
+    if (!strcmp(spec, "last")) return n;
+    char *end;
+    long v = strtol(spec, &end, 10);
+    if (end == spec || *end) return -1;
+    if (spec[0] == '+' || spec[0] == '-') {
+        if (v > n) v = n;
+        if (v < -n) v = -n;
+        v += cur;
+    }
+    return v < 1 ? 1 : v > n ? n : (int)v;
+}
+
+int walldb_move(const char *path, const char *spec) {
+    char cat[256];
+    int cur = 0, n = 0, found = 0, rc = -1;
+
+    if (txn("BEGIN") < 0) return -1;
+    if (normalize() == 0) {                                         /* so the numbers below can be trusted */
+        sqlite3_stmt *st;
+        if (sqlite3_prepare_v2(db, "SELECT category, pos, (SELECT count(*) FROM wall w WHERE w.category = wall.category) "
+                                   "FROM wall WHERE path = ?1", -1, &st, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(st, 1, path, -1, SQLITE_STATIC);
+            if (sqlite3_step(st) == SQLITE_ROW) {
+                const char *c = (const char *)sqlite3_column_text(st, 0);
+                size_t cl = c ? strlen(c) : 0;
+                if (c && cl < sizeof(cat)) {
+                    memcpy(cat, c, cl + 1);
+                    cur = sqlite3_column_int(st, 1);
+                    n = sqlite3_column_int(st, 2);
+                    found = 1;
+                }
+            }
+            sqlite3_finalize(st);
+        }
+        if (!found) rc = -1;
+        else if (!cat[0]) rc = -2;                                  /* no category, no position */
+        else {
+            int t = target_pos(spec, cur, n);
+            if (t >= 1) {
+                int ok = 1;
+                if (t != cur)                                       /* shift the ones in between, then drop it in place */
+                    ok = exec_i(t < cur ? "UPDATE wall SET pos = pos + 1 WHERE category = ?1 AND pos >= ?2 AND pos < ?3"
+                                        : "UPDATE wall SET pos = pos - 1 WHERE category = ?1 AND pos > ?3 AND pos <= ?2",
+                                cat, t, cur) >= 0
+                      && exec_i("UPDATE wall SET pos = ?2 WHERE path = ?1", path, t, 0) >= 0;
+                rc = ok ? t : -1;
+            }
+        }
+    }
+    if (rc < 0 || txn("COMMIT") < 0) {
+        int err = rc < 0 ? rc : -1;
+        txn("ROLLBACK");
+        return err;
+    }
+    return rc;
+}
+
 int walldb_set_category(const char *path, const char *cat) {
     char buf[256];
     if (clean_category(cat, buf, sizeof(buf)) < 0) return -1;
-    return write_sql("UPDATE wall SET category = ?1 WHERE path = ?2", buf, path) > 0 ? 0 : -1;
+    return write_norm("UPDATE wall SET category = ?1, pos = CASE WHEN category = ?1 THEN pos ELSE NULL END WHERE path = ?2", buf, path) > 0 ? 0 : -1;
 }
 
 int walldb_set_category_folder(const char *folder, const char *cat, int level, int *rated) {
@@ -244,12 +398,12 @@ int walldb_set_category_folder(const char *folder, const char *cat, int level, i
     if (rated) *rated = 0;
 
     int rows = -1, r = 0, ok = txn("BEGIN") == 0;
-    if (ok) ok = (rows = write_sql("UPDATE wall SET category = ?1 WHERE " IN_FOLDER, buf, f)) >= 0;
+    if (ok) ok = (rows = write_sql("UPDATE wall SET category = ?1, pos = CASE WHEN category = ?1 THEN pos ELSE NULL END WHERE " IN_FOLDER, buf, f)) >= 0;
     if (ok && level > 0) {                                  /* only the unrated ones: never touches an existing rating */
         char v[2] = { (char)('0' + level), '\0' };
         ok = (r = write_sql("UPDATE wall SET purity = CAST(?1 AS INTEGER) WHERE purity = 0 AND " IN_FOLDER, v, f)) >= 0;
     }
-    if (ok) ok = txn("COMMIT") == 0;
+    if (ok) ok = normalize() == 0 && txn("COMMIT") == 0;
     if (!ok) {
         txn("ROLLBACK");
         fputs("walldb: update failed, nothing was changed\n", stderr);
@@ -277,13 +431,17 @@ int walldb_info(const char *path) {
     sqlite3_stmt *st;
     int rc = -1;
 
-    if (db && sqlite3_prepare_v2(db, "SELECT name, category, purity FROM wall WHERE path = ?1", -1, &st, NULL) == SQLITE_OK) {
+    if (db && sqlite3_prepare_v2(db, "SELECT name, category, purity, pos, "
+                                     "(SELECT count(*) FROM wall w WHERE w.category = wall.category) "
+                                     "FROM wall WHERE path = ?1", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text(st, 1, path, -1, SQLITE_STATIC);
         if (sqlite3_step(st) == SQLITE_ROW) {
             int p = sqlite3_column_int(st, 2);
-            printf("name:     %s\npath:     %s\ncategory: %s\npurity:   %d (%s)\n",
-                   sqlite3_column_text(st, 0), path, sqlite3_column_text(st, 1),
-                   p, label[p >= 0 && p <= 3 ? p : 0]);
+            const char *cat = (const char *)sqlite3_column_text(st, 1);
+            printf("name:     %s\npath:     %s\ncategory: %s\n", sqlite3_column_text(st, 0), path, cat);
+            if (cat && cat[0] && sqlite3_column_type(st, 3) != SQLITE_NULL)
+                printf("position: %d of %d\n", sqlite3_column_int(st, 3), sqlite3_column_int(st, 4));
+            printf("purity:   %d (%s)\n", p, label[p >= 0 && p <= 3 ? p : 0]);
             rc = 0;
         }
         sqlite3_finalize(st);
@@ -301,15 +459,18 @@ int walldb_info(const char *path) {
     return 0;
 }
 
-static int scalar(const char *sql, const char *arg) {
-    sqlite3_stmt *st;
-    int n = -1;
-    if (db && sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
-        if (arg) sqlite3_bind_text(st, 2, arg, -1, SQLITE_STATIC);
-        if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
-        sqlite3_finalize(st);
-    }
-    return n;
+int walldb_total(void) {
+    return scalar("SELECT count(*) FROM wall", NULL);
+}
+
+void walldb_forget(void) {
+    db = NULL;
+}
+
+/* A file or a whole folder moved: update the rows in place so tags and ratings stay (the tag rows follow via ON UPDATE CASCADE) */
+int walldb_rename(const char *from, const char *to) {
+    return write_sql("UPDATE wall SET path = ?2 || substr(path, length(?1) + 1) "
+                     "WHERE path = ?1 OR (path >= ?1 || '/' AND path < ?1 || '0')", from, to);
 }
 
 int walldb_unrated(const char *cat) {
@@ -326,15 +487,15 @@ int walldb_exists(const char *path) {
 int walldb_clear_category(const char *cat) {
     char buf[256];
     if (clean_category(cat, buf, sizeof(buf)) < 0 || !buf[0]) return -1;
-    return write_sql("UPDATE wall SET category = ?1 WHERE " IN_CAT, "", buf);
+    return write_norm("UPDATE wall SET category = ?1 WHERE " IN_CAT, "", buf);
 }
 
 /* ── listings for scripts: tab-separated, to stdout ────────────────────── */
 
 #define LIST_SELECT \
     "SELECT path, purity, category, name, " \
-    "(SELECT group_concat(tag, ',') FROM tag WHERE tag.path = wall.path) FROM wall"
-#define LIST_ORDER " ORDER BY category COLLATE NOCASE, name COLLATE NATSORT, path"
+    "(SELECT group_concat(tag, ',') FROM tag WHERE tag.path = wall.path), pos FROM wall"
+#define LIST_ORDER " ORDER BY category COLLATE NOCASE, pos, name COLLATE NATSORT, path"
 
 static int print_rows(const char *sql, const char *arg) {
     sqlite3_stmt *st;
@@ -362,6 +523,10 @@ int walldb_print_walls(const char *view) {
     if (!strcmp(view, "?"))             return print_rows(LIST_SELECT " WHERE (purity = 0 OR category = '')" LIST_ORDER, NULL);
     if (view[0] == '@')                 return print_rows(LIST_SELECT " WHERE " IN_TAG LIST_ORDER, view + 1);
     return print_rows(LIST_SELECT " WHERE " IN_CAT LIST_ORDER, view);
+}
+
+int walldb_print_tiers(void) {
+    return print_rows("SELECT folder, level FROM tier ORDER BY folder COLLATE NOCASE", NULL);
 }
 
 /* Drops rows whose file no longer exists (their tags go with them). Refuses when the
@@ -403,7 +568,7 @@ int walldb_prune(const char *root) {
     int ok = txn("BEGIN") == 0;
     for (int i = 0; ok && i < gone.n; i++)
         ok = write_sql("DELETE FROM wall WHERE path = ?1", gone.v[i], NULL) >= 0;
-    if (ok) ok = txn("COMMIT") == 0;
+    if (ok) ok = normalize() == 0 && txn("COMMIT") == 0;
     if (!ok) {
         txn("ROLLBACK");
         fputs("walldb: prune failed, nothing was removed\n", stderr);
@@ -418,8 +583,12 @@ int walldb_prune(const char *root) {
 
 static sqlite3_stmt *ins;
 static size_t scan_rootlen;
-static const char *const *scan_tiers;
-static int scan_ntiers, scan_added, scan_skipped, scan_err;
+static int scan_added, scan_skipped, scan_err;
+
+/* the remembered "Folder=N" mappings, loaded for the walk */
+#define MAX_TIERS 64
+static struct { char folder[256]; size_t len; int level; } scan_tier[MAX_TIERS];
+static int scan_ntiers;
 
 static int is_image(const char *name) {
     const char *ext = strrchr(name, '.');
@@ -427,12 +596,51 @@ static int is_image(const char *name) {
                    !strcasecmp(ext, ".webp") || !strcasecmp(ext, ".ff"));
 }
 
-/* "Folder=N": N (0..3 or a level name) and the length of Folder, or -1 when malformed */
-static int tier_level(const char *t, size_t *len) {
+#define TIER_REMOVE (-2)
+
+/* "Folder=N": N (0..3 or a level name), TIER_REMOVE for "Folder=-", -1 when malformed; *len = length of Folder */
+static int tier_arg(const char *t, size_t *len) {
+    *len = 0;
     const char *eq = strchr(t, '=');
-    if (!eq || eq == t) return -1;
+    if (!eq || eq == t || (size_t)(eq - t) >= sizeof(scan_tier[0].folder)) return -1;
     *len = (size_t)(eq - t);
-    return walldb_level(eq + 1);
+    return strcmp(eq + 1, "-") ? walldb_level(eq + 1) : TIER_REMOVE;
+}
+
+/* store (or forget) the tiers given on the command line */
+static int save_tiers(const char *const *tiers, int ntiers) {
+    for (int i = 0; i < ntiers; i++) {
+        char f[256], v[2];
+        size_t nl;
+        int lvl = tier_arg(tiers[i], &nl);
+        if (lvl == -1 || nl == 0) return -1;                    /* walldb_scan checked already; never trust that here */
+        memcpy(f, tiers[i], nl);
+        while (nl > 1 && f[nl - 1] == '/') nl--;
+        f[nl] = '\0';
+        v[0] = (char)('0' + (lvl > 0 ? lvl : 0));
+        v[1] = '\0';
+        int rc = lvl == TIER_REMOVE ? write_sql("DELETE FROM tier WHERE folder = ?1", f, NULL)
+                                    : write_sql("INSERT OR REPLACE INTO tier(folder, level) VALUES(?1, CAST(?2 AS INTEGER))", f, v);
+        if (rc < 0) return -1;
+    }
+    return 0;
+}
+
+static int load_tiers(void) {
+    sqlite3_stmt *st;
+    scan_ntiers = 0;
+    if (sqlite3_prepare_v2(db, "SELECT folder, level FROM tier", -1, &st, NULL) != SQLITE_OK) return -1;
+    while (scan_ntiers < MAX_TIERS && sqlite3_step(st) == SQLITE_ROW) {
+        const char *f = (const char *)sqlite3_column_text(st, 0);
+        size_t n = f ? strlen(f) : 0;
+        if (n == 0 || n >= sizeof(scan_tier[0].folder)) continue;
+        memcpy(scan_tier[scan_ntiers].folder, f, n + 1);
+        scan_tier[scan_ntiers].len = n;
+        scan_tier[scan_ntiers].level = sqlite3_column_int(st, 1);
+        scan_ntiers++;
+    }
+    sqlite3_finalize(st);
+    return 0;
 }
 
 static int visit(const char *fpath, const struct stat *sb, int type, struct FTW *ftw) {
@@ -451,14 +659,13 @@ static int visit(const char *fpath, const struct stat *sb, int type, struct FTW 
     memcpy(cat, rel, dlen);
     cat[dlen] = '\0';
 
-    /* "Folder=N" arguments turn an old tier folder into a purity instead of a category */
+    /* a remembered "Folder=N" turns a tier folder into a purity instead of a category */
     int p = 0;
     const char *c = cat;
     for (int i = 0; i < scan_ntiers; i++) {
-        size_t nl;
-        int lvl = tier_level(scan_tiers[i], &nl);
-        if (lvl >= 0 && dlen >= nl && !memcmp(cat, scan_tiers[i], nl) && (cat[nl] == '\0' || cat[nl] == '/')) {
-            p = lvl;
+        size_t nl = scan_tier[i].len;
+        if (dlen >= nl && !memcmp(cat, scan_tier[i].folder, nl) && (cat[nl] == '\0' || cat[nl] == '/')) {
+            p = scan_tier[i].level;
             c = cat + nl + (cat[nl] ? 1 : 0);
             break;
         }
@@ -490,8 +697,8 @@ int walldb_scan(const char *root, const char *const *tiers, int ntiers, int *ski
     if (!db || n == 0 || n >= sizeof(r)) return -1;
     for (int i = 0; i < ntiers; i++) {
         size_t nl;
-        if (tier_level(tiers[i], &nl) < 0) {
-            fprintf(stderr, "walldb: bad tier '%s' (want Folder=0..3 or Folder=SFW|Sketchy|NSFW)\n", tiers[i]);
+        if (tier_arg(tiers[i], &nl) == -1) {
+            fprintf(stderr, "walldb: bad tier '%s' (want Folder=0..3, Folder=SFW|Sketchy|NSFW, or Folder=- to forget it)\n", tiers[i]);
             return -1;
         }
     }
@@ -499,16 +706,16 @@ int walldb_scan(const char *root, const char *const *tiers, int ntiers, int *ski
     r[n] = '\0';
 
     scan_rootlen = n;
-    scan_tiers = tiers;
-    scan_ntiers = ntiers;
-    scan_added = 0;
-    scan_skipped = 0;
-    scan_err = 0;
+    scan_added = scan_skipped = scan_err = 0;
+    ins = NULL;
 
-    if (sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO wall(path, name, category, purity) VALUES(?1, ?2, ?3, ?4)",
-                           -1, &ins, NULL) != SQLITE_OK) return -1;
-    int rc = txn("BEGIN") == 0 ? nftw(r, visit, 16, FTW_ACTIONRETVAL) : -1;
-    sqlite3_finalize(ins);
+    int rc = (txn("BEGIN") == 0 && save_tiers(tiers, ntiers) == 0 && load_tiers() == 0) ? 0 : -1;
+    if (rc == 0) {
+        rc = sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO wall(path, name, category, purity) VALUES(?1, ?2, ?3, ?4)",
+                                -1, &ins, NULL) == SQLITE_OK ? nftw(r, visit, 16, FTW_ACTIONRETVAL) : -1;
+        sqlite3_finalize(ins);
+    }
+    if (rc == 0 && !scan_err) rc = normalize();                 /* new rows go to the end of their category */
     if (rc < 0 || scan_err || txn("COMMIT") < 0) {
         txn("ROLLBACK");
         fputs("walldb: scan failed, nothing was added\n", stderr);

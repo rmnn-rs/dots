@@ -3,8 +3,10 @@
  * The table ends with { {NULL}, 0 }. */
 static const AppConfig apps[] = {
     /* command                                               | delay (-1 = once) */
-    { {"/bin/sh", "-c", "slstatus -s | dwl", NULL},             -1 },
-    { {"waywall", "-D", NULL},                                   2 },
-    { {NULL},                                                    0 }
+//    { { "/bin/sh", "-c", "slstatus -s | dbus-run-session dwl",   NULL }, -1 },
+    { {"waywall", "--daemon",                                    NULL},   2 },
+    { {"/bin/sh", "-c", "sls -s > \"$DWL_STATUS_FIFO\"",         NULL},   3 },
+    { {"dunst",                                                  NULL},   5 },
+    { {NULL},                                                             0 }
 };
 
