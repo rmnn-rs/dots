@@ -14,7 +14,6 @@ static const int showbar            = 1;        /* 0 means no bar */
 static const int topbar             = 1;        /* 0 means bottom bar */
 static const int vertpad            = 5;        /* vertical padding of bar */
 static const int sidepad            = 7;        /* horizontal padding of bar */
-//static const char *fonts[]        = { "JetBrainsMono:size=7", "NotoColorEmoji:pixelsize=12:antialias=true:autohint=true"};
 static const char *fonts[]        = { "Terminus:size=8", "unifont:size=8:antialias=false", "NotoColorEmoji:pixelsize=11:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=9"};
 //static const char *fonts[]          = { "JetBrainsMono Nerd Font:size=7", "unifont:size=7:antialias=false", "NotoColorEmoji:pixelsize=10:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=8"};
 static const char dmenufont[]       = "Terminus:size=12";
