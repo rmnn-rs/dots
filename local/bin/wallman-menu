@@ -1,0 +1,120 @@
+#!/bin/sh
+# A number jumps to that wall. Anything else is handed to wallman, so every command in
+# `wallman -h` works here (and any future one). Piped input works too:
+#   printf 'n\nrate sfw\nmov first\n' | wallsh
+
+W=${WALLMAN:-wallman}
+set -f                                    # '*' and '?' are view names, never globs
+
+interactive() { [ -t 0 ]; }
+isnum() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
+pause() { interactive && { printf '\n[enter] '; read -r _; }; }
+
+help() {
+    cat <<'EOF'
+  <number>                jump to that wall in the current view
+  n  p  r                 next / previous / random wall
+  >  <                    next / previous view (categories; * and ? when they have something)
+  view <name>             go to a view:  *  ?  Anime  Anime/Eva  @tag
+  purity <1-3|sfw|sketchy|nsfw|+|->    what may be shown (resets to SFW when the daemon restarts)
+  slide <30|5m> [n|p|r]   slideshow every 30 s / 5 min   (slide off stops it)
+
+  info                    details of the wall on screen
+  rate <0-3|sfw|..> [Category|@tag]     rate it, or a whole category / tag
+  ct <Category> [folder [sfw|..]]       category for the wall (or a whole folder; rates the unrated ones)
+  unct <Category>         remove a category from every wall
+  mov <n|+n|-n|first|last>              move it inside its category
+  name <text>   tag <t..>   untag <t..>
+  set <path>              draw any image; a library file becomes the current wall
+
+  list [view]   cats   tiers            print to the screen (tab-separated)
+  scan [Folder=N..]   prune   reload   save
+  h  help      q  quit
+EOF
+}
+
+header() {
+    [ -t 1 ] && clear
+    printf '%s\n' '--- WallMan Wallpaper Manager ---'
+     st=$($W -i 2>&1) || st='daemon not running (start it with: wallman -D)'
+    inf=$($W --info 2>&1)
+    printf '%s\n' "$st"
+    printf '\n'
+    printf '%s\n' '--- Info ---'
+    printf '\n'
+    printf '%s\n' "$inf"
+    $W info 2>/dev/null
+    printf '\n'
+    printf '%s\n' '---------------' \
+        ' <n> jump   n/p/r   >/< view   view <x>   purity <x>   rate/ct/mov/tag...   h help   q quit'
+}
+
+show() {                                  # print output; paged when long, then wait so it is not wiped
+    n=$(printf '%s\n' "$1" | wc -l)
+    if interactive && [ "$n" -gt 20 ]; then
+        pager=${PAGER:-less}
+        command -v "$pager" >/dev/null 2>&1 || pager=more
+        printf '%s\n' "$1" | "$pager"
+    else
+        printf '%s\n' "$1"
+        pause
+    fi
+}
+
+run() {                                   # a wallman command; show whatever it printed
+    out=$($W "$@" 2>&1)
+    [ -n "$out" ] && show "$out"
+}
+
+table() {                                 # same, with the tabs made readable
+    out=$($W "$@" 2>&1 | tr '\t' '|')
+    [ -n "$out" ] && show "$out"
+}
+
+one() {                                   # the whole rest of the line is ONE argument (spaces allowed)
+    if [ -n "$rest" ]; then run "$1" "$rest"; else run "$1"; fi
+}
+
+confirm() {
+    interactive || return 0               # piped input means you meant it
+    printf '%s [y/N] ' "$1"
+    read -r a
+    case $a in y|Y|yes) return 0 ;; esac
+    return 1
+}
+
+while :; do
+    header
+    printf 'wallman> '
+    read -r line || break                 # end of piped input
+    interactive || printf '%s\n' "$line"   # piped: echo the line so the transcript reads like a session
+    set -- $line
+    cmd=$1
+    [ $# -gt 0 ] && shift
+    rest=$*
+
+    [ -z "$cmd" ] && continue
+    if isnum "$cmd"; then run -j "$cmd"; continue; fi
+
+    case $cmd in
+        q|quit|exit)  break ;;
+        h|help|'?')   help; pause ;;
+        n|next)       run --next ;;
+        p|prev)       run --prev ;;
+        r|rand)       run --rand ;;
+        '>')          run --fnext ;;
+        '<')          run --fprev ;;
+        view|name|set) one "$cmd" ;;
+        slide)
+            case $1 in
+                off) run save ;;          # any plain command stops the slideshow; save doesn't move anything
+                '')  printf 'slide <30|5m> [n|p|r]\n'; pause ;;
+                *)   case $2 in p|prev) m=prev ;; r|rand) m=rand ;; *) m=next ;; esac
+                     run -y "$1" "$m" ;;
+            esac ;;
+        list)         if [ -n "$rest" ]; then table --list "$rest"; else table --list; fi ;;
+        --cats|--tiers)   table "$cmd" ;;
+        --unct|--prune)   confirm "$cmd $rest - sure?" && run "$cmd" $rest ;;
+        *)            run "$cmd" $rest ;; # info, rate, ct, mov, tag, untag, purity, scan, reload, save, ...
+    esac
+done

@@ -3,7 +3,7 @@
     follow = mouse
 		width = 350
     origin = bottom-right
-    offset = 48x48
+    offset = (48, 48)
 
     progress_bar = true
     progress_bar_height = 10
@@ -19,7 +19,7 @@
     padding = 15
     horizontal_padding = 15
     frame_width = 0
-    corner_radius = 10
+    corner_radius = 5
     sort = yes
     idle_threshold = 120
 
@@ -36,10 +36,6 @@
     stack_duplicates = true
     hide_duplicate_count = false
     show_indicators = yes
-    icon_position = left
-    min_icon_size = 50
-    max_icon_size = 60
-    icon_path = $HOME/.local/share/icons/dunst
     sticky_history = yes
     history_length = 20
     always_run_script = true
@@ -51,6 +47,14 @@
     mouse_left_click = do_action, close_current
     mouse_middle_click = do_action, close_current
     mouse_right_click = close_all
+
+    # Icon
+icon_position = left
+min_icon_size = 54
+max_icon_size = 80
+icon_path = /usr/share/icons/Arc/status/symbolic:/usr/share/icons/Arc/panel/16:/usr/share/icons/Arc/panel/22
+icon_corner_radius = 4
+
 
 [experimental]
     per_monitor_dpi = false

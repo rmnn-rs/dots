@@ -1,0 +1,14 @@
+#!/bin/sh
+
+#sls -s | dbus-run-session dwl -s "sh -c 'waywall --daemon & dunst &'"
+
+#sls -s | dbus-run-session dwl -s cerberus-wl
+
+FIFO="$XDG_RUNTIME_DIR/dwl-status-$$.fifo"
+mkfifo "$FIFO"
+export DWL_STATUS_FIFO="$FIFO"
+trap 'rm -f "$FIFO"' EXIT
+
+while true; do
+    cat "$FIFO"
+done | dbus-run-session dwl -s cerberus-wl

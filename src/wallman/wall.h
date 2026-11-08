@@ -25,5 +25,15 @@ void wall_folder_select(const void *arg);
 void wall_apply(void);
 void wall_setup_renderer(void);
 
+int wall_x_fd(void); void wall_x_dispatch(void);
+
+void wall_purity(const void *arg);
+void wall_purity_step(const void *arg);
+void wall_view(const char *name);
+const char *wall_current(void);
+
+void wall_jump(const char *path);
+void wall_show(const char *path);
+
 #endif
 

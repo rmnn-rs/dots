@@ -27,5 +27,13 @@ void wall_setup_renderer(void);
 int wall_wl_fd(void);
 int wall_wl_dispatch(void);
 
+void wall_purity(const void *arg);
+void wall_purity_step(const void *arg);
+void wall_view(const char *name);
+const char *wall_current(void);
+
+void wall_jump(const char *path);
+void wall_show(const char *path);
+
 #endif
 

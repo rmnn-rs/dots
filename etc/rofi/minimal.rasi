@@ -1,5 +1,7 @@
 configuration {
   font: "Terminus 16";
+  show-icons: true;
+  icon-theme: "Arc";
 
   drun {
     display-name: "Run:";
@@ -25,10 +27,12 @@ configuration {
   padding: 0;
   spacing: 0;
 
-  bg: #1e1e2e;
-  bg-alt: #f0f0f0;
-  fg: #d3859a;
-  fg-alt: #f0f0f0;
+  /* Rosé Pine Palette */
+  bg: #191724;       /* Base */
+  bg-alt: #1f1d2e;   /* Surface */
+  fg: #e0def4;       /* Text */
+  fg-alt: #908caa;   /* Subtle */
+  pine: #31748f;     /* Pine */
 
   background-color: @bg;
   text-color: @fg;
@@ -36,6 +40,7 @@ configuration {
 
 window {
   transparency: "real";
+  width: 50%;
 }
 
 mainbox {
@@ -44,29 +49,54 @@ mainbox {
 
 inputbar {
   children: [prompt, entry];
+  background-color: @bg-alt;
 }
 
 entry {
   padding: 12px 0;
+  text-color: @fg;
 }
 
 prompt {
   padding: 12px;
+  text-color: @pine;
 }
 
 listview {
   lines: 8;
+  fixed-height: true;
 }
 
 element {
-  children: [element-text];
+  children: [element-icon, element-text];
+}
+
+element-icon {
+  size: 24px;
+  padding: 10px;
+  /* Prevent icon from disappearing */
+  background-color: transparent;
+  text-color: inherit;
 }
 
 element-text {
   padding: 12px;
   text-color: @fg-alt;
+  /* Prevent text from disappearing */
+  background-color: transparent;
+}
+
+/* THE FIX: Explicitly forcing colors on selection */
+element selected {
+  background-color: @pine;
+  text-color: @bg;
 }
 
 element-text selected {
-  text-color: @fg;
+  background-color: @pine;
+  text-color: @bg; /* Dark text on light blue background */
+}
+
+element-icon selected {
+  background-color: @pine;
 }

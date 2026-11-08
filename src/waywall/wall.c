@@ -2,29 +2,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
 #include <unistd.h>
 #include <limits.h>
-#include <ctype.h>
-#include <time.h>
 #include <libgen.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/mman.h>
-#include <errno.h>
-#include <sys/wait.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <wayland-client.h>
 #include <Imlib2.h>
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wall.h"
+#include "walldb.h"
 
 int count = 0;
 int cur = 0;
 char current_folder[256] = "";
 char master_dir[1024] = "";
 static char **files = NULL;
-static int capacity = 0;
 
 /* Internal Renderer State */
 typedef struct Output {
@@ -44,7 +38,6 @@ static struct zwlr_layer_shell_v1 *layer_shell = NULL;
 static Output *outputs = NULL;
 static int ready = 0;   /* setup finished: new outputs map themselves */
 static int redraw = 0;  /* an output appeared or was resized */
-//static Imlib_Image current_imlib_image = NULL;
 
 static size_t path_join(char *dest, size_t max, const char *p1, const char *p2, const char *p3) {
     size_t l1 = p1 ? strlen(p1) : 0;
@@ -161,19 +154,21 @@ static const struct wl_registry_listener reg_listener = {
 void wall_setup_renderer(void) {
     if (wl_dpy) return;
     wl_dpy = wl_display_connect(NULL);
-    if (!wl_dpy) exit(1);
+    if (!wl_dpy) { fputs("Error: cannot connect to the Wayland compositor\n", stderr); exit(1); }
 
     struct wl_registry *reg = wl_display_get_registry(wl_dpy);
     wl_registry_add_listener(reg, &reg_listener, NULL);
     wl_display_roundtrip(wl_dpy); /* globals */
-    if (!compositor || !shm || !layer_shell) exit(1);
+    if (!compositor || !shm || !layer_shell) {
+        fputs("Error: the compositor needs wl_compositor, wl_shm and zwlr_layer_shell_v1\n", stderr);
+        exit(1);
+    }
     wl_display_roundtrip(wl_dpy); /* output modes */
 
     ready = 1;
     for (Output *o = outputs; o; o = o->next) output_map(o);
     wl_display_roundtrip(wl_dpy); /* configure -> sizes */
 
-//    imlib_set_cache_size(64 * 1024 * 1024);
     imlib_set_cache_size(0);
 }
 
@@ -208,24 +203,6 @@ static void output_present(Output *o, const void *pixels) {
     wl_surface_commit(o->surf);
 }
 
-/*static void prefetch_neighbors(void) {
-    if (count < 2) return;
-    int neighbors[2] = { (cur - 1 + count) % count, (cur + 1) % count };
-
-    for (int i = 0; i < 2; i++) {
-        char path[PATH_MAX];
-        if (path_join(path, sizeof(path), master_dir, current_folder, files[neighbors[i]])) {
-            Imlib_Image img = imlib_load_image(path);
-            if (img) {
-                imlib_context_set_image(img);
-                imlib_free_image(); // Remains in Imlib2's 32MB cache
-            }
-        }
-    }
-}*/
-
-
-
 const char *get_save_path(void) {
     static char path[PATH_MAX];
     if (path[0]) return path;
@@ -248,116 +225,41 @@ static void free_files(void) {
     free(files);
     files = NULL;
     count = 0;
-    capacity = 0;
 }
 
-static int natural_sort(const void *a, const void *b) {
-    const char *s1 = *(const char **)a;
-    const char *s2 = *(const char **)b;
-    while (*s1 && *s2) {
-        if (isdigit((unsigned char)*s1) && isdigit((unsigned char)*s2)) {
-            char *p1, *p2;
-            long n1 = strtol(s1, &p1, 10);
-            long n2 = strtol(s2, &p2, 10);
-            if (n1 != n2) return (n1 < n2) ? -1 : 1;
-            s1 = p1; s2 = p2;
-        } else {
-            if (tolower((unsigned char)*s1) != tolower((unsigned char)*s2))
-                return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
-            s1++; s2++;
-        }
-    }
-    return (unsigned char)*s1 - (unsigned char)*s2;
-}
-
-static void scan_and_fill(void) {
-    char scan_path[PATH_MAX];
-    if (!path_join(scan_path, sizeof(scan_path), master_dir, current_folder, NULL))
-        return;
-
-    struct dirent **namelist = NULL;
-    int n = scandir(scan_path, &namelist, NULL, NULL);
-    if (n < 0)
-        return;
-
-    for (int i = 0; i < n; i++) {
-        if (count >= 10000) {
-            for (int j = i; j < n; j++) free(namelist[j]);
-            break;
-        }
-
-        if (namelist[i]->d_name[0] != '.') {
-            const char *ext = strrchr(namelist[i]->d_name, '.');
-            if (ext && (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".png") == 0 ||
-                        strcasecmp(ext, ".jpeg") == 0 || strcasecmp(ext, ".webp") == 0 || strcasecmp(ext, ".ff") == 0 )) {
-
-                struct stat st;
-                char fpath[PATH_MAX];
-                if (path_join(fpath, sizeof(fpath), scan_path, namelist[i]->d_name, NULL)) {
-                    if (stat(fpath, &st) == 0 && S_ISREG(st.st_mode)) {
-                        char *s = strdup(namelist[i]->d_name);
-                        if (s) {
-                            if (count >= capacity) {
-                                int new_cap = capacity ? capacity * 2 : 16;
-                                char **tmp = realloc(files, sizeof(char *) * (size_t)new_cap);
-                                if (!tmp) {
-                                    free(s);
-                                    for (int j = i; j < n; j++) free(namelist[j]);
-                                    break;
-                                }
-                                files = tmp;
-                                capacity = new_cap;
-                            }
-                            files[count++] = s;
-                        }
-                    }
-                }
-            }
-        }
-        free(namelist[i]);
-    }
-
-    free(namelist);
-
-    if (count > 0) {
-        qsort(files, (size_t)count, sizeof(char *), natural_sort);
-    }
+/* walls in the view, -1 when the database could not be read (busy writer, missing file) */
+static int scan_and_fill(void) {
+    int n = walldb_open(get_save_path()) == 0 ? walldb_list(current_folder, &files) : -1;
+    count = n > 0 ? n : 0;
+    return n;
 }
 
 static void wall_init(void) {
     if (files) return;
+    char want[PATH_MAX] = "";
     const char *save = get_save_path();
     if (master_dir[0] == '\0' && save) {
         FILE *f = fopen(save, "r");
         if (f) {
-            char rel_path[PATH_MAX] = "";
             if (fgets(master_dir, sizeof(master_dir), f))
                 master_dir[strcspn(master_dir, "\n")] = 0;
-            if (fgets(rel_path, sizeof(rel_path), f))
-                rel_path[strcspn(rel_path, "\n")] = 0;
+            if (fgets(current_folder, sizeof(current_folder), f))
+                current_folder[strcspn(current_folder, "\n")] = 0;
+            if (fgets(want, sizeof(want), f))
+                want[strcspn(want, "\n")] = 0;
             fclose(f);
-
-            char d_tmp[PATH_MAX], b_tmp[PATH_MAX];
-            size_t rlen = strlen(rel_path);
-            if (rlen < PATH_MAX) {
-                memcpy(d_tmp, rel_path, rlen + 1);
-                memcpy(b_tmp, rel_path, rlen + 1);
-                char *fdir = dirname(d_tmp);
-                char *fname = basename(b_tmp);
-
-                size_t flen = strlen(fdir);
-                if (flen < sizeof(current_folder)) memcpy(current_folder, fdir, flen + 1);
-
-                scan_and_fill();
-                for (int i = 0; i < count; i++) {
-                    if (strcmp(files[i], fname) == 0) { cur = i; break; }
-                }
-                return;
-            }
         }
     }
-    scan_and_fill();
+
+    if (scan_and_fill() == 0 && strcmp(current_folder, "*") != 0) { /* stale or emptied view: show everything */
+        memcpy(current_folder, "*", 2);
+        scan_and_fill();
+    }
+    for (int i = 0; i < count; i++)
+        if (strcmp(files[i], want) == 0) { cur = i; break; }
 }
+
+static char shown[PATH_MAX]; /* what's on screen: the target of CLI edits, even after a reload moves cur */
 
 static void run_setter(const char *filename) {
     if (!wl_dpy) {
@@ -372,7 +274,7 @@ static void run_setter(const char *filename) {
     redraw = 0;
 
     char fullpath[PATH_MAX];
-    if (!path_join(fullpath, sizeof(fullpath), master_dir, current_folder, filename))
+    if (!path_join(fullpath, sizeof(fullpath), master_dir, filename, NULL))
         return;
 
     Imlib_Image buffer = imlib_load_image(fullpath);
@@ -380,6 +282,7 @@ static void run_setter(const char *filename) {
         fprintf(stderr, "Error: Imlib2 failed to load %s\n", fullpath);
         return;
     }
+    if (filename != shown) memcpy(shown, filename, strlen(filename) + 1);   /* fits: path_join checked master_dir/filename */
 
     // Get Image dimensions
     imlib_context_set_image(buffer);
@@ -424,29 +327,46 @@ int wall_wl_fd(void) {
     return wl_dpy ? wl_display_get_fd(wl_dpy) : -1;
 }
 
-/* Called when wall_wl_fd() is readable: handle output hotplug/resize. -1 = compositor gone */
+/* Call before waiting on wall_wl_fd() and whenever it is readable: reads what the compositor sent without
+ * blocking, handles output hotplug / resize and redraws if that changed anything. -1 = compositor gone.
+ * Before waiting matters: events a roundtrip already read are queued here and would never wake the fd. */
 int wall_wl_dispatch(void) {
-    if (wl_display_dispatch(wl_dpy) < 0) {
-        fprintf(stderr, "Error: Wayland connection lost\n");
-        return -1;
+    while (wl_display_prepare_read(wl_dpy) != 0)
+        wl_display_dispatch_pending(wl_dpy);
+    wl_display_flush(wl_dpy);
+
+    struct pollfd p = { .fd = wl_display_get_fd(wl_dpy), .events = POLLIN };
+    if (poll(&p, 1, 0) > 0) {
+        if (wl_display_read_events(wl_dpy) < 0) goto lost;
+    } else {
+        wl_display_cancel_read(wl_dpy);
     }
-    if (redraw && count > 0) run_setter(files[cur]);
+    if (wl_display_dispatch_pending(wl_dpy) < 0) goto lost;
+
+    if (redraw && shown[0]) run_setter(shown);            /* what is on screen, which set may have changed */
     wl_display_flush(wl_dpy);
     return 0;
+
+lost:
+    fprintf(stderr, "Error: Wayland connection lost\n");
+    return -1;
 }
 
 void wall_reload(const void *arg) {
     (void)arg;
 
     char *current_name = (files && count > 0) ? strdup(files[cur]) : NULL;
+    int gone = current_name != NULL;        /* until we find the wall on screen again */
     free_files();
     wall_init();
     if (current_name) {
         for (int i = 0; i < count; i++) {
-            if (strcmp(files[i], current_name) == 0) { cur = i; break; }
+            if (strcmp(files[i], current_name) == 0) { cur = i; gone = 0; break; }
         }
         free(current_name);
     }
+    if (cur >= count) cur = 0;
+    if (gone && count > 0) run_setter(files[cur]);   /* it left the view (rated, recategorized, deleted): show what took its place */
 }
 
 void wall_cycle(const void *arg) {
@@ -479,7 +399,7 @@ void wall_save(const void *arg) {
     FILE *f = fopen(temp_path, "w");
     if (!f) return;
 
-    if (fprintf(f, "%s\n%s/%s\n", master_dir, current_folder, files[cur]) < 0) goto cleanup;
+    if (fprintf(f, "%s\n%s\n%s\n", master_dir, current_folder, files[cur]) < 0) goto cleanup;
     if (fflush(f) != 0) goto cleanup;
 
     int fd = fileno(f);
@@ -506,62 +426,72 @@ void wall_random(const void *arg) {
 
     wall_init();
     if (count <= 1) return;
-    cur = rand() % count;
+    cur = (cur + 1 + rand() % (count - 1)) % count;     /* never the one already showing */
     run_setter(files[cur]);
 }
 
-void wall_folder_select(const void *arg) {
-    if (!arg || master_dir[0] == '\0') return;
-
-    struct dirent **namelist;
-    int n = scandir(master_dir, &namelist, NULL, alphasort);
-    if (n < 0) return;
-
-    char **folders = NULL;
-    int f_count = 0, f_cur = 0, f_cap = 0;
-
-    for (int i = 0; i < n; i++) {
-        int is_dir = (namelist[i]->d_type == DT_DIR);
-        if (namelist[i]->d_type == DT_UNKNOWN) {
-            struct stat st;
-            char full[PATH_MAX];
-            if (path_join(full, sizeof(full), master_dir, namelist[i]->d_name, NULL)) {
-                if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) is_dir = 1;
-            }
-        }
-
-        if (is_dir && namelist[i]->d_name[0] != '.') {
-            char *s = strdup(namelist[i]->d_name);
-            if (s) {
-                if (f_count >= f_cap) {
-                    f_cap = f_cap ? f_cap * 2 : 8;
-                    char **tmp = realloc(folders, sizeof(char *) * f_cap);
-                    if (!tmp) { free(s); break; }
-                    folders = tmp;
-                }
-                folders[f_count] = s;
-                if (strcmp(folders[f_count], current_folder) == 0) f_cur = f_count;
-                f_count++;
-            }
-        }
-        free(namelist[i]);
-    }
-    free(namelist);
-
-    if (f_count == 0) { free(folders); return; }
-
-    int dir = ((Arg *)arg)->i;
-    f_cur = (f_cur + dir + f_count) % f_count;
-
-    size_t flen = strlen(folders[f_cur]);
-    if (flen < sizeof(current_folder)) memcpy(current_folder, folders[f_cur], flen + 1);
-
+static void view_apply(void) {
     free_files();
     cur = 0;
     wall_init();
     if (count > 0) run_setter(files[cur]);
+}
 
-    for (int j = 0; j < f_count; j++) free(folders[j]);
-    free(folders);
+void wall_folder_select(const void *arg) {
+    if (!arg || master_dir[0] == '\0') return;
+    if (walldb_next_view(current_folder, ((const Arg *)arg)->i,
+                         current_folder, sizeof(current_folder)) == 0)
+        view_apply();
+}
+
+void wall_view(const char *name) {
+    size_t n = name ? strlen(name) : 0;
+    if (n == 0 || n >= sizeof(current_folder)) return;
+    memcpy(current_folder, name, n + 1);
+    view_apply();
+}
+
+static void purity_apply(void) {
+    wall_reload(NULL);                      /* redraws if the current one was just filtered out; an emptied view falls back to "*" in wall_init */
+}
+
+void wall_purity(const void *arg) {
+    if (walldb_set_purity(((const Arg *)arg)->i) == 0) purity_apply();
+}
+
+void wall_purity_step(const void *arg) {
+    if (walldb_set_purity(walldb_get_purity() + ((const Arg *)arg)->i) == 0) purity_apply();
+}
+
+const char *wall_current(void) {
+    return shown[0] ? shown : NULL;
+}
+
+/* Make a library file (path relative to the master dir) the current wallpaper. Stays in the
+ * current view when it's there, otherwise tries the inbox, then everything. */
+void wall_jump(const char *path) {
+    if (!path || !path[0]) return;
+    char keep[sizeof(current_folder)];
+    memcpy(keep, current_folder, sizeof(keep));
+
+    const char *tries[] = { keep, "?", "*" };
+    for (int t = 0; t < 3; t++) {
+        size_t n = strlen(tries[t]);
+        memcpy(current_folder, tries[t], n + 1);
+        free_files();
+        wall_init();
+        for (int i = 0; i < count; i++)
+            if (strcmp(files[i], path) == 0) { cur = i; run_setter(files[cur]); return; }
+    }
+    /* in no view (e.g. rated above the allowed purity): draw it and leave the lists as they were */
+    memcpy(current_folder, keep, sizeof(keep));
+    free_files();
+    wall_init();
+    run_setter(path);
+}
+
+/* Draw a file under the master dir without touching the lists */
+void wall_show(const char *path) {
+    if (path && path[0]) run_setter(path);
 }
 

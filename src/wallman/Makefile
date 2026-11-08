@@ -1,10 +1,10 @@
 CC = gcc
 # Added -D_GNU_SOURCE to ensure all system features are available
-CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -O3 -Wall -Wextra $(shell pkg-config --cflags imlib2 x11 xinerama)
-LIBS = $(shell pkg-config --libs imlib2 x11 xinerama) -lXext
+CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -O3 -Wall -Wextra -Werror $(shell pkg-config --cflags imlib2 x11 xinerama)
+LIBS = $(shell pkg-config --libs imlib2 x11 xinerama) -lXext -lXrandr -lsqlite3
 
 TARGET = wallman
-SRC = wallman.c wall.c
+SRC = wallman.c wall.c walldb.c wallwatch.c
 OBJ = $(SRC:.c=.o)
 
 all: $(TARGET)

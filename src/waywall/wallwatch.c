@@ -96,7 +96,7 @@ static char *join_rel(const char *dir, const char *name) {
 static void on_event(const struct inotify_event *e) {
     if (e->mask & IN_Q_OVERFLOW) { dirty = rewatch_needed = 1; return; }      /* lost events: look at everything */
     if (e->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) { dirty = rewatch_needed = 1; return; }
-    if (e->len == 0 || e->name[0] == '.') return;                             /* hidden: scan skips those too (.wallman-show) */
+    if (e->len == 0 || e->name[0] == '.') return;                             /* hidden: scan skips those too (.wallman-temp) */
 
     dirty = 1;
     if (e->mask & IN_ISDIR) rewatch_needed = 1;

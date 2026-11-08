@@ -29,7 +29,6 @@
 
 #include "drw.h"
 #include "util.h"
-#include "proc.h"
 
 /* macros */
 #define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)

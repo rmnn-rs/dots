@@ -1,0 +1,11 @@
+#!/bin/sh
+# Get info for the prompt
+INFO=$(wallman -i | awk -F '| ' '{print $2}')
+
+# Use dmenu to get the index
+SEL=$(echo "" | dmenu -p "Jump to ($INFO):")
+
+# If input is a number, jump
+if [ -n "$SEL" ]; then
+    wallman -j "$SEL"
+fi

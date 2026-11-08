@@ -1,16 +1,3 @@
-/* The patches I have enabled are:
-* - alpha
-* - border
-* - center
-* - fuzzyhighlight
-* - fuzzymatch
-* - grid
-* - lineheight
-* - morecolor
-* - mousesupport
-* - numbers
-* - XYW  */
-
 static int topbar = 0;            /* -b  option; if 0, dmenu appears at bottom */
 
 #if ALPHA_PATCH

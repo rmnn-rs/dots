@@ -3,7 +3,6 @@
 #include "../slstatus.h"
 #include "../util.h"
 
-/* Pointing directly to the T440p Analog PCH */
 #define CARD "hw:1"
 
 const char *
@@ -46,7 +45,6 @@ vol_perc(const char *unused)
 
 	vol = (long)(((float)raw_vol / (float)max) * 100.0f + 0.5f);
 
-	/* Icon logic based on your script */
 	if (sw == 0)
 		icon = "🔇";
 	else if (vol > 70)

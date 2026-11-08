@@ -1,7 +1,7 @@
 CC = gcc
 PKGS = imlib2 wayland-client
 CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -O3 -Wall -Wextra $(shell pkg-config --cflags $(PKGS))
-LIBS = $(shell pkg-config --libs $(PKGS))
+LIBS = $(shell pkg-config --libs $(PKGS)) -lsqlite3
 
 # Protocol XMLs: layer-shell is vendored in this directory (same protocol on wlroots and
 # neuswc, no wlr-protocols package needed); xdg-shell comes from wayland-protocols
@@ -12,7 +12,7 @@ GEN_H = wlr-layer-shell-unstable-v1-client-protocol.h
 GEN_C = wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c
 
 TARGET = waywall
-SRC = wallman.c wall.c $(GEN_C)
+SRC = wallman.c wall.c walldb.c wallwatch.c $(GEN_C)
 OBJ = $(SRC:.c=.o)
 
 all: $(TARGET)

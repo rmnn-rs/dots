@@ -15,4 +15,4 @@ configuration{
     sidebar-mode: true;
 }
 
-//@theme "etc/rofi/minimal.rasi"
+@theme "etc/rofi/minimal.rasi"

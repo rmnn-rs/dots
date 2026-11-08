@@ -14,20 +14,15 @@ static const int showbar            = 1;        /* 0 means no bar */
 static const int topbar             = 1;        /* 0 means bottom bar */
 static const int vertpad            = 5;        /* vertical padding of bar */
 static const int sidepad            = 7;        /* horizontal padding of bar */
-static const char *fonts[]        = { "Terminus:size=8", "unifont:size=8:antialias=false", "NotoColorEmoji:pixelsize=11:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=9"};
-//static const char *fonts[]          = { "JetBrainsMono Nerd Font:size=7", "unifont:size=7:antialias=false", "NotoColorEmoji:pixelsize=10:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=8"};
+static const char *fonts[]          = { "Terminus:size=8", "unifont:size=8:antialias=false", "NotoColorEmoji:pixelsize=11:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=9"};
+//static const char *fonts[]        = { "JetBrainsMono Nerd Font:size=7", "unifont:size=7:antialias=false", "NotoColorEmoji:pixelsize=10:antialias=true:autohint=true", "Font Awesome 6 Free Solid:size=8"};
 static const char dmenufont[]       = "Terminus:size=12";
 static unsigned int baralpha        = 0xb0;
 static unsigned int borderalpha     = OPAQUE;
 
 
-//static const char *tags[] = { "", "", "", "", "", "", "", "", "", "", "", "", ""};
-//static const char *tags[] = { "", "", "", "", "", "", "", "", "", "",};
-//static const char *tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "*", "*", "*", "*", "*"};
 static const char *tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "*"};
 //static const char *tags[] = { "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X "};
-//static const char *tags[] = { "일", "이", "삼", "사", "오", "육", "칠", "팔", "구" };
-//static const char *tags[] = { "一", "二", "三", "四", "五", "六", "七", "八", "九" };
 
 static const Rule rules[] = {
 	/* xprop(1):
@@ -54,32 +49,17 @@ static const int nmaster     = 1;    /* number of clients in master area */
 static const int resizehints = 0;    /* 1 means respect size hints in tiled resizals */
 static const int lockfullscreen = 1; /* 1 will force focus on the fullscreen window */
 
-static const char black[]       = "#181818"; //OG #222222
-static const char gray2[]       = "#005577"; //OG #444444
+static const char black[]       = "#181818";
+static const char gray2[]       = "#005577";
 static const char gray3[]       = "#bbbbbb";
 static const char gray4[]       = "#eeeeee";
-//static const char blue[]        = "#1e1e2e"; //OG #005577 Purple #8D6298 Bl#2e3e64 C #1E1E2E #d3859a #774466
 static const char blue[]        = "#202020";
-//static const char bor[]         = "#005577";
 static const char *colors[][3]      = {
 	//               fg        bg        border
-	[SchemeNorm] = { gray3,   black,        0 },
+	[SchemeNorm] = { gray3,   black,    0      },
 	[SchemeSel]  = { gray4,   blue,     blue   },
-	[SchemeHid]  = { blue,    black,    gray4 },
+	[SchemeHid]  = { blue,    black,    gray4  },
 };
-
-/*static const char black[]       = "#191724";
-static const char gray2[]       = "#1f1d2e";
-static const char gray3[]       = "#e0def4";
-static const char gray4[]       = "#ebbcba";
-static const char blue[]        = "#31748f";
-
-static const char *colors[][3]      = {
-    //               fg         bg         border
-    [SchemeNorm] = { gray3,     black,     0        },
-    [SchemeSel]  = { black,     blue,      blue     },
-    [SchemeHid]  = { blue,      black,     gray4    },
-};*/
 
 static const unsigned int stairpx   = 70;       /* depth of the stairs layout */
 static const int stairdirection     = 1;        /* 0: left-aligned, 1: right-aligned */
@@ -122,58 +102,42 @@ static const Layout layouts[] = {
 
 static char dmenumon[2] = "0";
 
-/*const AppConfig apps[] = {
-    // command                                               | delay (-1 = once)
-    { {"/usr/bin/xset", "b", "off", NULL},                      -1 },
-    { {"xset", "r", "rate", "200", "50", NULL},                 -1 },
-    { {"picom", NULL},                                           5 },
-//  { {"bar", NULL},                                             2 },
-//  { {"slstatus", NULL},                                        2 },
-    { {"dunst", NULL},                                           5 },
-    { {"unclutter", "--timeout", "5", NULL},                     3 },
-    { {"wallman", "-D", NULL},                                              2 },
-    { {"bat-notify", NULL},                                      3 },
-    { {"dbus-update-activation-environment", "--all", NULL},    -1 },
-    { {NULL},                                                    0 }
-};*/
-
-
 #include <X11/XF86keysym.h>
 
 static const Key keys[] = {
-	{ MODKEY,                  XK_Return, spawn, {.v = (const char*[]){ TERMINAL, NULL } } },
-//	{ MODKEY,                  XK_d,      spawn, {.v = (const char*[]){"rofi", "-show", "drun", NULL } } },
-//      { MODKEY|SHIFT,            XK_d,      spawn, {.v = (const char*[]){"rofi", "-show", "run", NULL } } },
-        { MODKEY|SHIFT,            XK_d,      spawn, {.v = (const char*[]){"rofi", "-show", "drun", NULL } } },
-	{ MODKEY,                  XK_d,      spawn, {.v = (const char*[]){ "dmenu_run", "-m", dmenumon, "-fn", dmenufont, "-nb", black, "-nf", gray3, "-sb", blue, "-sf", gray4, NULL } } },
-	{ MODKEY,                  XK_w,      spawn, {.v = (const char*[]){ BROWSER, NULL} } },
-	{ MODKEY|SHIFT,            XK_w,      spawn, {.v = (const char*[]){ TERMINAL, "iwctl",  NULL } } },
-	{ MODKEY,                  XK_a,      spawn, {.v = (const char*[]){ TERMINAL, "lfrun", NULL } } },
-	{ MODKEY|SHIFT,            XK_a,      spawn, {.v = (const char*[]){"cosmic-files", NULL } } },
-//	{ MODKEY,                  XK_v,      spawn, {.v = (const char*[]){"systemctl", "suspend", NULL } } },
-	{ MODKEY,                  XK_v,      spawn, {.v = (const char*[]){"sudo", "zzz", NULL } } },
-	{ MODKEY,                  XK_z,      spawn, {.v = (const char*[]){"slock", NULL } } },
-	{ MODKEY|CONTROL,          XK_s,      spawn, {.v = (const char*[]){ "dmenu_run", "-m", dmenumon, "-fn", dmenufont, "-nb", black, "-nf", gray3, "-sb", blue, "-sf", gray4, NULL } } },
-	{ MODKEY,                  XK_r,      spawn, {.v = (const char*[]){ TERMINAL, "sudo", "htop",   NULL } } },
-	{ MODKEY,		   XK_n,      spawn, {.v = (const char*[]){ TERMINAL,  "nvim", NULL } } },
-	{ MODKEY,                  XK_g,      spawn, {.v = (const char*[]){ TERMINAL, "tremc", NULL } } },
-	{ MODKEY,                  XK_c,      spawn, {.v = (const char*[]){ "wallman", "--next", NULL } } },
-	{ MODKEY,                  XK_x,      spawn, {.v = (const char*[]){ "wallman", "--prev", NULL } } },
-	{ MODKEY|SHIFT,            XK_s,      spawn, {.v = (const char*[]){ "wallman", "--save", NULL } } },
-	{ MODKEY|CONTROL|SHIFT,    XK_c,      spawn, {.v = (const char*[]){ "wallman", "--rand", NULL } } },
+	{ MODKEY,                  XK_Return,         spawn, {.v = (const char*[]){ TERMINAL, NULL } } },
+//	{ MODKEY,                  XK_d,              spawn, {.v = (const char*[]){"rofi", "-show", "drun", NULL } } },
+//      { MODKEY|SHIFT,            XK_d,              spawn, {.v = (const char*[]){"rofi", "-show", "run", NULL } } },
+        { MODKEY|SHIFT,            XK_d,              spawn, {.v = (const char*[]){"rofi", "-show", "drun", NULL } } },
+	{ MODKEY,                  XK_d,              spawn, {.v = (const char*[]){ "dmenu_run", "-m", dmenumon, "-fn", dmenufont, "-nb", black, "-nf", gray3, "-sb", blue, "-sf", gray4, NULL } } },
+	{ MODKEY,                  XK_w,              spawn, {.v = (const char*[]){ BROWSER, NULL} } },
+	{ MODKEY|SHIFT,            XK_w,              spawn, {.v = (const char*[]){ TERMINAL, "iwctl",  NULL } } },
+	{ MODKEY,                  XK_a,              spawn, {.v = (const char*[]){ TERMINAL, "lfrun", NULL } } },
+	{ MODKEY|SHIFT,            XK_a,              spawn, {.v = (const char*[]){"cosmic-files", NULL } } },
+//	{ MODKEY,                  XK_v,              spawn, {.v = (const char*[]){"systemctl", "suspend", NULL } } },
+	{ MODKEY,                  XK_v,              spawn, {.v = (const char*[]){"sudo", "zzz", NULL } } },
+	{ MODKEY,                  XK_z,              spawn, {.v = (const char*[]){"slock", NULL } } },
+	{ MODKEY|CONTROL,          XK_s,              spawn, {.v = (const char*[]){ "dmenu_run", "-m", dmenumon, "-fn", dmenufont, "-nb", black, "-nf", gray3, "-sb", blue, "-sf", gray4, NULL } } },
+	{ MODKEY,                  XK_r,              spawn, {.v = (const char*[]){ TERMINAL, "sudo", "htop",   NULL } } },
+	{ MODKEY,		   XK_n,              spawn, {.v = (const char*[]){ TERMINAL,  "nvim", NULL } } },
+	{ MODKEY,                  XK_g,              spawn, {.v = (const char*[]){ TERMINAL, "tremc", NULL } } },
+	{ MODKEY,                  XK_c,              spawn, {.v = (const char*[]){ "wallman", "--next", NULL } } },
+	{ MODKEY,                  XK_x,              spawn, {.v = (const char*[]){ "wallman", "--prev", NULL } } },
+	{ MODKEY|SHIFT,            XK_s,              spawn, {.v = (const char*[]){ "wallman", "--save", NULL } } },
+	{ MODKEY|CONTROL|SHIFT,    XK_c,              spawn, {.v = (const char*[]){ "wallman", "--rand", NULL } } },
 	{ ALTKEY|SHIFT,            XK_bracketleft,    spawn, {.v = (const char*[]){ "wallman", "--purity", "1", NULL } } },
 	{ ALTKEY|SHIFT,            XK_bracketright,   spawn, {.v = (const char*[]){ "wallman", "--purity", "2", NULL } } },
 	{ ALTKEY|SHIFT,            XK_backslash,      spawn, {.v = (const char*[]){ "wallman", "--purity", "3", NULL } } },
 	{ ALTKEY,                  XK_bracketleft,    spawn, {.v = (const char*[]){ "wallman", "--rate", "1", NULL } } },
 	{ ALTKEY,                  XK_bracketright,   spawn, {.v = (const char*[]){ "wallman", "--rate", "2", NULL } } },
 	{ ALTKEY,                  XK_backslash,      spawn, {.v = (const char*[]){ "wallman", "--rate", "3", NULL } } },
-	{ MODKEY,                  XK_s,      spawn, {.v = (const char*[]){  TERMINAL, "wallman-menu",    NULL } } },
-	{ MODKEY|SHIFT,            XK_c,      spawn, {.v = (const char*[]){ "wallman", "--fnext", NULL } } },
-	{ MODKEY|SHIFT,            XK_x,      spawn, {.v = (const char*[]){ "wallman", "--fprev", NULL } } },
-	{ MODKEY|SHIFT,            XK_r,      spawn, {.v = (const char*[]){ "wallman", "--scan", NULL } } },
-	//{ MODKEY,                XK_m,      spawn, {.v = (const char*[]){ "/home/pc/src/scripts/s2", NULL } } },
-	{ MODKEY,                  XK_m,      spawn, {.v = (const char*[]){ "/home/pc/Games/reVC/reVC_run", NULL } } },
-	{ MODKEY,                  XK_Home,   spawn, {.v = (const char*[]){ "layout", NULL } } },
+	{ MODKEY,                  XK_s,              spawn, {.v = (const char*[]){  TERMINAL, "wallman-menu",    NULL } } },
+	{ MODKEY|SHIFT,            XK_c,              spawn, {.v = (const char*[]){ "wallman", "--fnext", NULL } } },
+	{ MODKEY|SHIFT,            XK_x,              spawn, {.v = (const char*[]){ "wallman", "--fprev", NULL } } },
+	{ MODKEY|SHIFT,            XK_r,              spawn, {.v = (const char*[]){ "wallman", "--scan", NULL } } },
+	//{ MODKEY,                XK_m,              spawn, {.v = (const char*[]){ "/home/pc/src/scripts/s2", NULL } } },
+	{ MODKEY,                  XK_m,              spawn, {.v = (const char*[]){ "/home/pc/Games/reVC/reVC_run", NULL } } },
+	{ MODKEY,                  XK_Home,           spawn, {.v = (const char*[]){ "layout", NULL } } },
 
 
 	{ 0,                       XF86XK_MonBrightnessUp,     spawn, {.v = (const char*[]){ "backlight", "up", NULL } } },
