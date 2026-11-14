@@ -17,33 +17,82 @@
 #include <sys/resource.h>
 
 #include <dirent.h>
+#include <poll.h>
 #include "wall.h"
 #include "walldb.h"
 #include "wallwatch.h"
+#include "config.h"
+
 
 #define USAGE \
-    "Usage: wallman [options] [command]\n" \
-    "Options:\n" \
-    "  -D, --daemon          start the daemon (it keeps the database in step with the folder by itself)\n" \
-    "  -M, --manual          with -D: no automatic scan / prune, only when you ask\n" \
-    "  -S, --display <d>     X display to use (default $DISPLAY, e.g. :0)\n" \
-    "  -y, --interval <t>    slideshow: change every <t> (30, 5m); give it with -n, -p or -r\n" \
-    "  -j, --jump <n>        jump to wall n in the current view\n" \
-    "  -i, --status          print \"view | n/total\"\n" \
-    "  -h, --help            this text\n" \
-    "Commands:\n" \
-    "  -n, --next  -p, --prev  -r, --rand  -u, --fnext  -d, --fprev  -s, --save  -R, --reload\n" \
-    "  -v, --view <*|?|Category|@tag>      -P, --purity <1-3|SFW|Sketchy|NSFW|+|->\n" \
-    "  -o, --set <path>      draw any image; a library file also becomes the current one\n" \
-    "  -I, --info            details of the wall on screen\n" \
-    "  -g, --rate <0-3|SFW|..> [Category|@tag]   rate it, or a whole category / tag\n" \
-    "  -C, --ct <Category|-> [folder [SFW|..]]   set its category (or a whole folder's)\n" \
-    "  -U, --unct <Category> remove a category from every wall\n" \
-    "  -m, --mov <n|+n|-n|first|last>            move it inside its category\n" \
-    "  -N, --name <text>   -t, --tag <t..>   -T, --untag <t..>\n" \
-    "  -l, --list [view]   -c, --cats   -e, --tiers    print to stdout, tab-separated\n" \
-    "  -f, --scan [Folder=N|Folder=- ...]   add new files (Folder=N: that folder is a purity level, remembered)\n" \
-    "  -x, --prune           drop database rows whose file is gone\n"
+    "wallman - a wallpaper daemon\n" \
+    "\n" \
+    "usage:\n" \
+    "  wallman -D [options]              start the daemon\n" \
+    "  wallman <command> [arguments]     control the running daemon\n" \
+    "\n" \
+    "daemon:\n" \
+    "  -D, --daemon                    start the daemon; it keeps the database in\n" \
+    "                                  step with the folder on its own\n" \
+    "  -M, --manual                    with -D: no automatic scan / prune\n" \
+    "  -S, --display <d>               X display (default $DISPLAY, e.g. :0)\n" \
+    "  -R, --reload                    re-read the database\n" \
+    "  -q, --quit                      stop the daemon\n" \
+    "  -h, --help                      this text\n" \
+    "\n" \
+    "browse:\n" \
+    "  -n, --next                      next wall\n" \
+    "  -p, --prev                      previous wall\n" \
+    "  -r, --rand                      random wall\n" \
+    "  -j, --jump <n>                  wall number n of the current view\n" \
+    "  -u, --fnext                     next view\n" \
+    "  -d, --fprev                     previous view\n" \
+    "  -v, --view <view>               switch to a view\n" \
+    "  -P, --purity <level|+|->        what is shown; + and - step it\n" \
+    "  -y, --interval <t>              slideshow: change every <t> (30, 5m);\n" \
+    "                                  give it together with -n, -p or -r\n" \
+    "  -o, --set <path>                draw any image; a library file becomes the\n" \
+    "                                  current wall\n" \
+    "  -i, --status                    print \"view | n/total\"\n" \
+    "  -I, --info                      details of the wall on screen\n" \
+    "\n" \
+    "organise (the wall on screen):\n" \
+    "  -g, --rate <level> [cat|@tag]   rate it, or every wall of a category / tag\n" \
+    "  -C, --ct <cat|-> [dir [lvl]]    set its category, - clears it; with a folder\n" \
+    "                                  that whole folder, and lvl rates its\n" \
+    "                                  unrated walls\n" \
+    "  -U, --unct <cat>                remove a category from every wall\n" \
+    "  -m, --mov <n|+n|-n|first|last>  move it inside its category\n" \
+    "  --catmov <cat> <n|+n|-n|first|last>\n" \
+    "                                  move a category in the cycle of views\n" \
+    "  --cat-off [cat]                 hide a category: its walls leave *, tags, random\n" \
+    "                                  and the slideshow (default: the current view)\n" \
+    "  --cat-on [cat]                  show it again\n" \
+    "  -N, --name <text>               give it a name\n" \
+    "  -t, --tag <tag...>              add tags\n" \
+    "  -T, --untag <tag...>            remove tags\n" \
+    "\n" \
+    "library (the master dir and the database name are set in config.h):\n" \
+    "  -s, --save                      remember the view and the wall on screen\n" \
+    "  -f, --scan [folder=N ...]       add new files; folder=N makes a folder a\n" \
+    "                                  purity level (folder=- undoes it)\n" \
+    "  -x, --prune                     drop rows whose file is gone\n" \
+    "  -l, --list [view]               print walls, tab-separated\n" \
+    "  -c, --cats                      print the categories (name, walls, unrated, hidden)\n" \
+    "\n" \
+    "terms:\n" \
+    "  <level>   0 unrated, 1 SFW, 2 Sketchy, 3 NSFW (names work too)\n" \
+    "  <view>    *  everything     ?  inbox (unrated or uncategorised)\n" \
+    "            <cat>  a category     @<tag>  a tag\n" \
+    "\n" \
+    "examples:\n" \
+    "  wallman -D &                    start the daemon\n" \
+    "  wallman -y 5m -r                random wall every 5 minutes\n" \
+    "  wallman -v '?'                  go through the inbox\n" \
+    "  wallman -C Nature               categorize the wall on screen\n"
+
+
+#define STAGE_NAME ".wallman-temp"
 
 char sock_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static int serv_fd = -1;
@@ -54,6 +103,45 @@ extern char current_folder[256];
 extern int count, cur;
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
+
+/* A stream socket may take or give a message in pieces: send all n bytes, or fail. flags may hold
+ * MSG_DONTWAIT (the daemon never blocks on a client: a full buffer is a failure). */
+static int send_all(int fd, const void *buf, size_t n, int flags) {
+    const char *p = buf;
+    while (n > 0) {
+        ssize_t w = send(fd, p, n, flags | MSG_NOSIGNAL);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+/* Read until EOF or the buffer is full; returns the byte count, -1 on error. */
+static ssize_t read_all(int fd, char *buf, size_t max) {
+    size_t got = 0;
+    while (got < max) {
+        ssize_t r = read(fd, buf + got, max - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) return -1;
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    return (ssize_t)got;
+}
+
+/* Exactly the names stage_copy() makes: ".wallman-temp" plus an optional ".ext" (dot, up to 8 alnum) */
+static int is_stage_name(const char *name) {
+    size_t nl = sizeof(STAGE_NAME) - 1;
+    if (strncmp(name, STAGE_NAME, nl) != 0) return 0;
+    const char *rest = name + nl;
+    if (*rest == '\0') return 1;
+    if (*rest != '.' || strlen(rest) > 9) return 0;
+    for (const char *c = rest + 1; *c; c++)
+        if (!isalnum((unsigned char)*c)) return 0;
+    return 1;
+}
 
 static time_t now(void) {
     struct timespec t;
@@ -158,7 +246,7 @@ void get_sock_path(char *dest, size_t len, const char *display) {
     BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, (nr), 0, 1), \
     BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL_PROCESS)
 
-static void seccomp_apply(void) {
+static int seccomp_apply(void) {
     struct sock_filter filter[] = {
         /* Verify arch, kill if not x86-64 */
         BPF_STMT(BPF_LD|BPF_W|BPF_ABS,
@@ -206,12 +294,15 @@ static void seccomp_apply(void) {
         SC_ALLOW(__NR_mremap),      /* Imlib2 */
         SC_ALLOW(__NR_brk),
 
-        /* Sockets — X11 + Unix domain */
-        SC_ALLOW(__NR_socket),
+        /* Sockets — X11 + Unix domain. socket() is limited to AF_UNIX (no TCP/UDP/netlink/raw);
+         * bind() and listen() are not needed: the daemon's socket exists before the sandbox. */
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, __NR_socket, 0, 4),
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, AF_UNIX, 0, 1),
+        BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL_PROCESS),
         SC_ALLOW(__NR_connect),
         SC_ALLOW(__NR_accept4),
-        SC_ALLOW(__NR_bind),
-        SC_ALLOW(__NR_listen),
         SC_ALLOW(__NR_getsockopt),
         SC_ALLOW(__NR_setsockopt),
         SC_ALLOW(__NR_getsockname),
@@ -225,6 +316,7 @@ static void seccomp_apply(void) {
         SC_ALLOW(__NR_pselect6),
         SC_ALLOW(__NR_poll),
         SC_ALLOW(__NR_ppoll),
+        SC_ALLOW(__NR_restart_syscall),          /* poll()/select() interrupted by suspend or a signal are resumed through this */
         SC_ALLOW(__NR_rt_sigreturn),
         SC_ALLOW(__NR_rt_sigaction),
         SC_ALLOW(__NR_rt_sigprocmask),
@@ -241,8 +333,6 @@ static void seccomp_apply(void) {
         SC_ALLOW(__NR_fcntl),
         SC_ALLOW(__NR_ioctl),
         SC_ALLOW(__NR_unlink),      /* socket cleanup */
-        SC_ALLOW(__NR_rename),      /* atomic save */
-        SC_ALLOW(__NR_fsync),
         SC_ALLOW(__NR_umask),
         SC_ALLOW(__NR_getcwd),
         SC_ALLOW(__NR_clock_gettime),
@@ -258,12 +348,73 @@ static void seccomp_apply(void) {
         .filter = filter,
     };
 
-    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0)
-        fprintf(stderr, "seccomp: filter failed: %s\n", strerror(errno));
+    return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) == 0 ? 0 : -1;
 }
 
 #undef SC_ALLOW
 #undef SC_KILL
+
+/* ── Landlock: what the daemon may touch ─────────────────────────────── */
+
+/* seccomp can't look inside a path, Landlock can. After this the daemon can
+ *   - read: the master dir (the images and the database live there) and the system folders in
+ *           config.h's sandbox_read (libraries, Imlib2's loaders) - nothing else of yours, no ~/.ssh;
+ *   - write: nothing at all, except deleting its own socket on exit (REMOVE_FILE in the socket's folder).
+ * The daemon never writes: the database is opened read-only, a staged `--set` copy is made by the CLI.
+ * Together with the AF_UNIX only socket() filter, a compromised decoder can neither read nor send anything out.
+ * Best effort: a kernel without Landlock (< 5.13) just goes without. WALLMAN_NO_LANDLOCK=1 skips it. */
+#if __has_include(<linux/landlock.h>) && defined(SYS_landlock_create_ruleset)
+#include <linux/landlock.h>
+
+static int landlock_allow(int ruleset, const char *dir, unsigned long long access) {
+    int fd = open(dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct landlock_path_beneath_attr pb = { .allowed_access = access, .parent_fd = fd };
+    int rc = (int)syscall(SYS_landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
+    close(fd);
+    return rc;
+}
+
+static void landlock_apply(const char *runtime_dir) {
+    const char *off = getenv("WALLMAN_NO_LANDLOCK");
+    if (off && off[0] == '1') return;
+
+    int abi = (int)syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 1) {
+        fputs("wallman: Landlock is not available, file access is not confined\n", stderr);
+        return;
+    }
+
+    unsigned long long reads = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+    unsigned long long writes =
+        LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        LANDLOCK_ACCESS_FS_MAKE_SYM;
+#ifdef LANDLOCK_ACCESS_FS_REFER
+    if (abi >= 2) writes |= LANDLOCK_ACCESS_FS_REFER;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    if (abi >= 3) writes |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+
+    struct landlock_ruleset_attr attr = { .handled_access_fs = reads | writes };
+    int rs = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof(attr), 0);
+    if (rs < 0) return;
+
+    int ok = landlock_allow(rs, master_dir, reads) == 0;        /* the one folder this library is */
+    for (size_t i = 0; ok && i < sizeof(sandbox_read) / sizeof(*sandbox_read); i++)
+        landlock_allow(rs, sandbox_read[i], reads);             /* a system folder this machine lacks is no problem */
+    if (ok && runtime_dir)                                      /* only to unlink the socket at exit */
+        ok = landlock_allow(rs, runtime_dir, LANDLOCK_ACCESS_FS_REMOVE_FILE) == 0;
+
+    if (ok && syscall(SYS_landlock_restrict_self, rs, 0) != 0) ok = 0;
+    close(rs);
+    if (!ok) fputs("wallman: could not apply the Landlock restrictions, continuing without\n", stderr);
+}
+#else
+static void landlock_apply(const char *runtime_dir) { (void)runtime_dir; }
+#endif
 
 #endif /* __linux__ */
 
@@ -343,7 +494,6 @@ void run_command(char cmd, int target, const char *arg) {
         case 'n': wall_cycle(&fwd);        break;
         case 'p': wall_cycle(&bwd);        break;
         case 'r': wall_random(NULL);       break;
-        case 's': wall_save(NULL);         break;
         case 'u': wall_folder_select(&fwd);break;
         case 'd': wall_folder_select(&bwd);break;
         case 'R': wall_reload(NULL);       break;
@@ -388,10 +538,10 @@ static int ipc(const struct sockaddr_un *addr, const WallMsg *msg, char *resp, s
         return -1;
     }
     int n = 0;
-    if (write(fd, msg, sizeof(WallMsg)) != (ssize_t)sizeof(WallMsg)) n = -1;
+    if (send_all(fd, msg, sizeof(WallMsg), 0) < 0) n = -1;
     else if (resp) {
-        n = (int)read(fd, resp, rsz - 1);
-        if (n < 0) n = 0;
+        ssize_t got = read_all(fd, resp, rsz - 1);       /* the daemon replies once and closes */
+        n = got < 0 ? 0 : (int)got;
         resp[n] = '\0';
     }
     close(fd);
@@ -405,6 +555,36 @@ static void notify_daemon(void) {
     ipc(&watch_addr, &r, NULL, 0);
 }
 
+/* Is there a daemon answering on this display? (quietly, unlike ipc()) */
+static int daemon_up(const struct sockaddr_un *addr) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int ok = fd >= 0 && connect(fd, (const struct sockaddr *)addr, sizeof(*addr)) == 0;
+    if (fd >= 0) close(fd);
+    return ok;
+}
+
+/* What the daemon tells the CLI ('c'): the wall on screen and the view */
+struct state {
+    char buf[PATH_MAX + 256 + 8];
+    const char *path, *view;
+};
+
+static int query_state(const struct sockaddr_un *addr, struct state *st) {
+    WallMsg q = { .cmd = 'c', .interval = -1 };
+    int n = ipc(addr, &q, st->buf, sizeof(st->buf));
+    if (n <= 0) return -1;
+    const char **field[2] = { &st->path, &st->view };
+    char *p = st->buf;
+    for (int i = 0; i < 2; i++) {                               /* every field ends in '\n' */
+        char *nl = strchr(p, '\n');
+        if (!nl) return -1;
+        *nl = '\0';
+        *field[i] = p;
+        p = nl + 1;
+    }
+    return 0;
+}
+
 /* Unrated wallpapers only show in view '?', which is easy to mistake for a command that did nothing */
 static void unrated_hint(const char *cat) {
     int u = walldb_unrated(cat);
@@ -413,9 +593,7 @@ static void unrated_hint(const char *cat) {
 
 /* ── set <path>: show any image ─────────────────────────────────────────── */
 
-#define STAGE_NAME ".wallman-temp"
-
-/* The daemon is sandboxed to the master dir, so a file from elsewhere is copied to
+/* The daemon only ever draws files under the master dir, so a file from elsewhere is copied to
  * <master>/.wallman-temp<.ext> (hidden, so scan ignores it) and drawn from there. The real
  * extension is kept so Imlib2 picks the same loader it uses for library files of that type.
  * Fills name with the path relative to the master dir. */
@@ -437,7 +615,7 @@ static int stage_copy(const char *root, const char *src, char *name, size_t name
 
     DIR *d = opendir(root);                                             /* drop the previous staged copy (any extension) */
     for (struct dirent *e; d && (e = readdir(d)); )
-        if (!strncmp(e->d_name, STAGE_NAME, nl)) unlinkat(dirfd(d), e->d_name, 0);
+        if (is_stage_name(e->d_name)) unlinkat(dirfd(d), e->d_name, 0);
     if (d) closedir(d);
 
     memcpy(dst, root, rl);
@@ -446,7 +624,7 @@ static int stage_copy(const char *root, const char *src, char *name, size_t name
 
     int rc = -1;
     int in = open(src, O_RDONLY | O_CLOEXEC);
-    int out = in < 0 ? -1 : open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    int out = in < 0 ? -1 : open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (out >= 0) {
         char buf[65536];
         ssize_t n;
@@ -467,27 +645,33 @@ static int db_command(const struct sockaddr_un *addr, int argc, char **argv) {
         { "-I", "--info" }, { "-f", "--scan" }, { "-x", "--prune" }, { "-U", "--unct" }, { "-g", "--rate" },
         { "-C", "--ct" },   { "-N", "--name" }, { "-t", "--tag" },   { "-T", "--untag" }, { "-o", "--set" },
         { "-m", "--mov" },  { "-l", "--list" }, { "-c", "--cats" },  { "-e", "--tiers" },
+        { "-s", "--save" },
+        { "--catmov", "--catmov" }, { "--cat-off", "--cat-off" }, { "--cat-on", "--cat-on" },       /* long names only */
     };
     const char *c = NULL;
     for (size_t k = 0; k < sizeof(cmds) / sizeof(*cmds); k++)
         if (is(argv[0], cmds[k].s, cmds[k].l)) c = cmds[k].l;      /* from here on only the long names exist */
     if (!c) return -1;                                              /* not a database command */
 
-    if (!strcmp(c, "--list") || !strcmp(c, "--cats") || !strcmp(c, "--tiers")) {   /* works without the daemon */
-        if (walldb_open_rw(get_save_path()) < 0) return 1;                  /* read-write only so an old database gets migrated */
+    struct state st = { .path = "", .view = "" };
+    int up = daemon_up(addr) && query_state(addr, &st) == 0;
+    int lists = !strcmp(c, "--list") || !strcmp(c, "--cats") || !strcmp(c, "--tiers");
+    int offline = lists || !strcmp(c, "--scan") || !strcmp(c, "--prune") || !strcmp(c, "--unct") ||
+                  !strcmp(c, "--catmov") || !strcmp(c, "--cat-off") || !strcmp(c, "--cat-on");
+    if (!up && !offline) {                                      /* those work without the daemon (--scan imports a new library), the rest needs it */
+        fputs("Error: could not connect to daemon. Is it running?\n", stderr);
+        return 1;
+    }
+    if (walldb_open_rw(get_db_path()) < 0) return 1;            /* read-write: creates a missing database, migrates an old one */
+
+    if (lists) {
         int n = !strcmp(c, "--list") ? walldb_print_walls(argc > 1 ? argv[1] : "*")
               : !strcmp(c, "--cats") ? walldb_print_cats() : walldb_print_tiers();
         return n < 0 ? 1 : 0;
     }
 
-    char resp[1024 + PATH_MAX + 2];                             /* "<master dir>\n<current path>" */
-    WallMsg q = { .cmd = 'c', .interval = -1 };
-    if (ipc(addr, &q, resp, sizeof(resp)) < 0) return 1;
-    char *path = strchr(resp, '\n');
-    if (!path) return 1;
-    *path++ = '\0';
-
-    if (walldb_open_rw(get_save_path()) < 0) return 1;
+    const char *resp = master_dir;                              /* the master dir (config.h), and the wall on screen */
+    const char *path = st.path;
 
     int rc = 0;
     if (!strcmp(c, "--scan")) {
@@ -522,6 +706,20 @@ static int db_command(const struct sockaddr_un *addr, int argc, char **argv) {
         else fputs("Error: path too long\n", stderr);
         free(rp); free(rr);
         return (fits && ipc(addr, &s, NULL, 0) >= 0) ? 0 : 1;
+    } else if (!strcmp(c, "--catmov")) {                        /* catmov <Category> <n|+n|-n|first|last>: where it sits in the cycle of views */
+        int r = argc > 2 ? walldb_cat_move(argv[1], argv[2]) : -1;
+        if (r == -2) { fputs("Error: no wall has that category\n", stderr); return 1; }
+        if (r < 1) { fputs("Error: usage: --catmov <Category> <n|+n|-n|first|last>\n", stderr); return 1; }
+        printf("position: %d\n", r);
+    } else if (!strcmp(c, "--cat-off") || !strcmp(c, "--cat-on")) {     /* [Category]: hide or show it; without one, the current view */
+        const char *cat = argc > 1 ? argv[1] : st.view;
+        if (!cat[0] || !strcmp(cat, "*") || !strcmp(cat, "?") || cat[0] == '@') {
+            fputs("Error: usage: --cat-off|--cat-on [Category] (the current view is not a category)\n", stderr);
+            return 1;
+        }
+        int r = walldb_cat_hide(cat, !strcmp(c, "--cat-off"));
+        if (r == -2) { fputs("Error: no wall has that category\n", stderr); return 1; }
+        if (r < 0) { fputs("Error: update failed\n", stderr); return 1; }
     } else if (!strcmp(c, "--prune")) {
         int n = walldb_prune(resp);
         if (n < 0) return 1;
@@ -541,6 +739,13 @@ static int db_command(const struct sockaddr_un *addr, int argc, char **argv) {
         int n = walldb_rate_view(argv[2], walldb_level(argv[1]));
         if (n < 0) { fputs("Error: usage: --rate <0-3> <Category|@tag>\n", stderr); return 1; }
         printf("rated %d\n", n);
+    } else if (!strcmp(c, "--save")) {                          /* remember where we are: the view and the wall on screen */
+        int staged = is_stage_name(path);   /* a temporary copy is not a place to come back to */
+        if (walldb_set_meta("view", st.view) < 0 || (path[0] && !staged && walldb_set_meta("current", path) < 0)) {
+            fputs("Error: could not write to the database\n", stderr);
+            return 1;
+        }
+        return 0;
     } else if (!path[0]) {
         fputs("Error: no current wallpaper\n", stderr);
         return 1;
@@ -567,8 +772,10 @@ static int db_command(const struct sockaddr_un *addr, int argc, char **argv) {
     }
     if (rc < 0) { fputs("Error: update failed (not in the database, or bad value)\n", stderr); return 1; }
 
-    WallMsg r = { .cmd = 'R', .interval = -1 };
-    ipc(addr, &r, NULL, 0);
+    if (up) {                                                   /* tell the daemon (--scan and friends also work without one) */
+        WallMsg r = { .cmd = 'R', .interval = -1 };
+        ipc(addr, &r, NULL, 0);
+    }
     return 0;
 }
 
@@ -589,7 +796,7 @@ int main(int argc, char *argv[]) {
         else if (is(argv[argi], "-j", "--jump")     && argi + 1 < argc) {
             char *end;
             long val = strtol(argv[++argi], &end, 10);
-            jump_target = (*end != '\0' || val <= 0) ? -1 : (int)val;
+            jump_target = (*end != '\0' || val <= 0 || val > INT_MAX) ? -1 : (int)val;
         }
         else if (is(argv[argi], "-i", "--status"))   query_mode   = 1;
         else if (is(argv[argi], "-D", "--daemon"))   start_daemon = 1;
@@ -612,6 +819,8 @@ int main(int argc, char *argv[]) {
         (void)write(STDERR_FILENO, "Error: -j requires a positive integer\n", 38);
         return 1;
     }
+
+    if (!get_db_path()) return 1;                    /* config.h: the master dir, and the database inside it (the reason is printed) */
 
     get_sock_path(sock_path, sizeof(sock_path), display);
 
@@ -637,7 +846,7 @@ int main(int argc, char *argv[]) {
             else if (is(arg, "-r", "--rand")) msg.cmd = 'r';
             else if (is(arg, "-u", "--fnext")) msg.cmd = 'u';
             else if (is(arg, "-d", "--fprev")) msg.cmd = 'd';
-            else if (is(arg, "-s", "--save")) msg.cmd = 's';
+            else if (is(arg, "-q", "--quit")) msg.cmd = 'q';
             else if (is(arg, "-R", "--reload")) msg.cmd = 'R';
             else if (is(arg, "-P", "--purity")) {
                 msg.interval = -1;                              /* leave the slideshow timer alone */
@@ -651,7 +860,7 @@ int main(int argc, char *argv[]) {
                 size_t vl = strlen(val);
                 if (vl < sizeof(msg.arg)) memcpy(msg.arg, val, vl + 1);
             }
-            else if (arg[0] && !arg[1] && strchr("nprudsR", arg[0])) msg.cmd = arg[0];   /* the old one-letter forms */
+            else if (arg[0] && !arg[1] && strchr("nprudR", arg[0])) msg.cmd = arg[0];   /* the old one-letter forms */
             else {
                 fprintf(stderr, "Error: unknown command '%s' (wallman -h)\n", arg);
                 return 1;
@@ -672,14 +881,9 @@ int main(int argc, char *argv[]) {
     if (!start_daemon) return 0;
 
     /* Bail out if a daemon is already running on this display */
-    int test_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (test_fd >= 0) {
-        if (connect(test_fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-            (void)write(STDERR_FILENO, "Error: daemon already running\n", 30);
-            close(test_fd);
-            return 1;
-        }
-        close(test_fd);
+    if (daemon_up(&addr)) {
+        (void)write(STDERR_FILENO, "Error: daemon already running\n", 30);
+        return 1;
     }
 
     unlink(sock_path);
@@ -704,64 +908,74 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    wall_settings_init();                            /* creates the database in the master dir when it is not there yet */
     wall_setup_renderer();
-    wall_restore();
-    push_status();                                   /* baseline for change detection */
+    wall_prepare();                                  /* open the database and read the list now: SQLite's open-time syscalls are not in the filter */
 
-    if (!manual && master_dir[0]) {                  /* before the sandbox: the watcher is its own, unsandboxed process */
+    if (!manual) {                                   /* before the sandbox: the watcher is its own, unsandboxed process */
         watch_addr = addr;
-        wallwatch_start(master_dir, get_save_path(), notify_daemon);
+        wallwatch_start(master_dir, get_db_path(), notify_daemon);
     }
 
 #ifdef __linux__
     struct rlimit rl_zero = {0, 0};
     setrlimit(RLIMIT_NPROC, &rl_zero);
 
-    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
-        fprintf(stderr, "sandbox: PR_SET_NO_NEW_PRIVS failed: %s\n", strerror(errno));
-    }
-
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 
-    seccomp_apply();
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        fprintf(stderr, "sandbox: could not be installed (%s), not running unsandboxed\n", strerror(errno));
+        unlink(sock_path);
+        return 1;
+    }
+    {
+        char rdir[sizeof(sock_path)];
+        memcpy(rdir, sock_path, sizeof(rdir));
+        char *slash = strrchr(rdir, '/');
+        if (slash && slash != rdir) *slash = '\0';
+        landlock_apply(slash && slash != rdir ? rdir : NULL);
+    }
+    if (seccomp_apply() != 0) {                      /* no sandbox, no daemon */
+        fprintf(stderr, "sandbox: could not be installed (%s), not running unsandboxed\n", strerror(errno));
+        unlink(sock_path);
+        return 1;
+    }
 #endif
+
+    /* From here on everything runs sandboxed, including the first image decode */
+    wall_restore();
+    push_status();                                   /* baseline for change detection */
 
     /* ── Event loop ────────────────────────────────────────────────────── */
     while (running) {
         wall_x_dispatch();                                /* a monitor changed? (before sleeping: Xlib may already hold the event) */
+        /* poll(), not select(): FD_SET() writes out of bounds for a descriptor >= FD_SETSIZE, poll() has no such limit */
+        struct pollfd pfd[2 + MAX_SUBS];
+        int np = 0;
+        pfd[np++] = (struct pollfd){ .fd = serv_fd, .events = POLLIN };
+        pfd[np++] = (struct pollfd){ .fd = wall_x_fd(), .events = POLLIN };
+        for (int i = 0; i < nsubs; i++)
+            pfd[np++] = (struct pollfd){ .fd = subs[i], .events = POLLIN };
 
-        fd_set fds;
-        int xfd = wall_x_fd();
-        int maxfd = serv_fd > xfd ? serv_fd : xfd;
-        FD_ZERO(&fds);
-        FD_SET(serv_fd, &fds);
-        FD_SET(xfd, &fds);
-        for (int i = 0; i < nsubs; i++) {
-            FD_SET(subs[i], &fds);
-            if (subs[i] > maxfd) maxfd = subs[i];
-        }
-
-        struct timeval  tv      = { 0 };
-        struct timeval *timeout = NULL;
+        int timeout = -1;
         if (slideshow_interval > 0) {                     /* a deadline, not a countdown: status polls and the like don't postpone it */
             time_t left = next_slide - now();
-            tv.tv_sec = left > 0 ? left : 0;
-            timeout = &tv;
+            timeout = left > 0 ? (int)(left * 1000) : 0;  /* the interval is capped at a day, so this fits */
         }
 
-        int activity = select(maxfd + 1, &fds, NULL, NULL, timeout);
+        int activity = poll(pfd, (nfds_t)np, timeout);
         if (activity < 0) { if (errno == EINTR) continue; break; }
+
+        for (int i = nsubs; i-- > 0; )                    /* subscribers never send: readable or hung up means they left. Before anything pushes to them and reshuffles subs[] */
+            if (pfd[2 + i].revents) sub_drop(i);
+        int incoming = (pfd[0].revents & POLLIN) != 0;
+
         if (slideshow_interval > 0 && now() >= next_slide) {
             run_command(current_mode, 0, NULL);
             push_status();
             next_slide = now() + slideshow_interval;
         }
-        if (activity == 0) continue;
-
-        for (int i = nsubs; i-- > 0; )                    /* subscribers never send: readable means they hung up */
-            if (FD_ISSET(subs[i], &fds)) sub_drop(i);
-
-        if (!FD_ISSET(serv_fd, &fds)) continue;
+        if (!incoming) continue;
 
         int client_fd = accept4(serv_fd, NULL, NULL, SOCK_CLOEXEC);
         if (client_fd < 0) continue;
@@ -781,10 +995,11 @@ int main(int argc, char *argv[]) {
         WallMsg m = {0};
         int keep = 0;                                     /* a subscriber's connection stays open */
 
-        if (recv(client_fd, &m, sizeof(WallMsg), 0) == sizeof(WallMsg)) {
+        if (recv(client_fd, &m, sizeof(WallMsg), MSG_WAITALL) == sizeof(WallMsg)) {   /* all of it (the 1 s timeout cuts off a stalled client) */
             if (m.cmd == 'i') {
                 char resp[512];
-                (void)write(client_fd, resp, status_line(resp, sizeof(resp)));
+                size_t rn = status_line(resp, sizeof(resp));
+                (void)send_all(client_fd, resp, rn, MSG_DONTWAIT);
             }
             else if (m.cmd == 'w') {                      /* subscribe: keep the connection, see push_status() */
                 char msg[STATUS_MSG_MAX];
@@ -794,18 +1009,23 @@ int main(int argc, char *argv[]) {
                     keep = 1;
                 }
             }
-            else if (m.cmd == 'c') {                      /* "<master dir>\n<current path>", for the CLI */
-                char resp[1024 + PATH_MAX + 2];
+            else if (m.cmd == 'c') {                      /* "<current path>\n<view>\n", for the CLI */
+                char resp[PATH_MAX + 256 + 8];
                 const char *p = wall_current();
-                size_t rl = strlen(master_dir), pl = p ? strlen(p) : 0;
-                if (rl + 1 + pl <= sizeof(resp)) {
-                    memcpy(resp, master_dir, rl);
-                    resp[rl] = '\n';
-                    if (pl) memcpy(resp + rl + 1, p, pl);
-                    (void)write(client_fd, resp, rl + 1 + pl);
+                const char *field[2] = { p ? p : "", current_folder };
+                size_t off = 0;
+                int fits = 1;
+                for (int i = 0; i < 2 && fits; i++) {
+                    size_t fl = strlen(field[i]);
+                    if (off + fl + 1 > sizeof(resp)) { fits = 0; break; }
+                    memcpy(resp + off, field[i], fl);
+                    off += fl;
+                    resp[off++] = '\n';
                 }
+                if (fits) (void)send_all(client_fd, resp, off, MSG_DONTWAIT);
             }
-            else if (m.cmd && strchr("nprsudRjP+-VJS", m.cmd)) {
+            else if (m.cmd == 'q') running = 0;
+            else if (m.cmd && strchr("nprudRjP+-VJS", m.cmd)) {
                 if (m.interval >= 0) {
                     slideshow_interval = (m.interval > 86400) ? 86400 : m.interval;
                     next_slide = now() + slideshow_interval;

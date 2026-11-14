@@ -11,12 +11,13 @@ typedef union {
 
 extern char master_dir[1024];
 
-const char *get_save_path(void);
 extern char current_folder[256];
 extern int count, cur;
 
+const char *get_db_path(void);
+void wall_settings_init(void);
+
 void wall_cycle(const void *arg);
-void wall_save(const void *arg);
 void wall_restore(void);
 void wall_random(const void *arg);
 void wall_select(const void *arg);
@@ -26,6 +27,8 @@ void wall_apply(void);
 void wall_setup_renderer(void);
 
 int wall_x_fd(void); void wall_x_dispatch(void);
+
+void wall_prepare(void);
 
 void wall_purity(const void *arg);
 void wall_purity_step(const void *arg);

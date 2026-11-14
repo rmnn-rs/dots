@@ -12,6 +12,7 @@
 #include "walldb.h"
 
 static sqlite3 *db;
+static char db_base[256];       /* the open database's file name: it sits in the master dir, and a scan must not count it */
 static int purity = 3;
 
 static const char SCHEMA[] =
@@ -27,6 +28,8 @@ static const char SCHEMA[] =
     "  tag  TEXT NOT NULL,"
     "  PRIMARY KEY(path, tag));"
     "CREATE TABLE IF NOT EXISTS tier(folder TEXT PRIMARY KEY NOT NULL, level INTEGER NOT NULL);"
+    "CREATE TABLE IF NOT EXISTS cat_pref(name TEXT PRIMARY KEY NOT NULL, pos INTEGER, hidden INTEGER NOT NULL DEFAULT 0);"   /* where a category sits in the cycle, and whether it is hidden: a category itself is only a name on its walls */
+    "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);"   /* view, current */
     "CREATE INDEX IF NOT EXISTS wall_by_category ON wall(category);"
     "CREATE INDEX IF NOT EXISTS tag_by_tag ON tag(tag, path);";
 
@@ -34,8 +37,12 @@ static const char SCHEMA[] =
 #define ORDER " ORDER BY name COLLATE NATSORT, path LIMIT 10000"
 #define ORDER_POS " ORDER BY pos, name COLLATE NATSORT, path LIMIT 10000"
 
+/* walls of a hidden category are left out of "*" and of tags (so also of random and the slideshow); the category's
+ * own view still shows them, and so does the inbox ("?": an unrated wall must always be findable) */
+#define NOT_HIDDEN " AND NOT EXISTS (SELECT 1 FROM cat_pref p WHERE p.name = wall.category AND p.hidden = 1)"
+
 static const char Q_ALL[] =
-    "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1" ORDER;
+    "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1" NOT_HIDDEN ORDER;
 static const char Q_INBOX[] =
     "SELECT path FROM wall WHERE purity <= ?1 AND (purity = 0 OR category = '')" ORDER;
 #define IN_CAT "category = ?2"
@@ -46,10 +53,16 @@ static const char Q_INBOX[] =
 static const char Q_CAT[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_CAT ORDER_POS;
 /* a database from before positions existed, until the first write migrates it */
 static const char Q_CAT_OLD[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_CAT ORDER;
-static const char Q_TAG[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_TAG ORDER;
+static const char Q_TAG[] = "SELECT path FROM wall WHERE purity BETWEEN 1 AND ?1 AND " IN_TAG NOT_HIDDEN ORDER;
+/* the categories to cycle through: the ones moved by --catmov first, in that order, then the rest by name; hidden ones skipped */
 static const char Q_VIEWS[] =
-    "SELECT DISTINCT category FROM wall WHERE category <> '' AND purity BETWEEN 1 AND ?1 "
-    "ORDER BY category COLLATE NOCASE";
+    "SELECT w.category FROM wall w LEFT JOIN cat_pref p ON p.name = w.category "
+    "WHERE w.category <> '' AND w.purity BETWEEN 1 AND ?1 AND COALESCE(p.hidden, 0) = 0 "
+    "GROUP BY w.category ORDER BY (p.pos IS NULL), p.pos, w.category COLLATE NOCASE";
+/* every category, hidden or not, in that same order */
+static const char Q_CATS[] =
+    "SELECT w.category FROM wall w LEFT JOIN cat_pref p ON p.name = w.category "
+    "WHERE w.category <> '' GROUP BY w.category ORDER BY (p.pos IS NULL), p.pos, w.category COLLATE NOCASE";
 
 /* ── helpers ───────────────────────────────────────────────────────────── */
 
@@ -127,13 +140,16 @@ static int have_pos(void) {
 static int normalize(void);
 static int txn(const char *sql);
 
-static int open_db(const char *base, int flags) {
+static int open_db(const char *path, int flags) {
     if (db) return 0;
-    char path[PATH_MAX];
-    size_t n = base ? strlen(base) : 0;
-    if (n == 0 || n + 4 > sizeof(path)) return -1;
-    memcpy(path, base, n);
-    memcpy(path + n, ".db", 4);
+    if (!path || !path[0]) return -1;
+
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    size_t bl = strlen(base);
+    if (bl >= sizeof(db_base)) bl = sizeof(db_base) - 1;
+    memcpy(db_base, base, bl);
+    db_base[bl] = '\0';
 
     if (sqlite3_open_v2(path, &db, flags, NULL) != SQLITE_OK) {
         fprintf(stderr, "walldb: %s: %s\n", path, sqlite3_errmsg(db));
@@ -149,10 +165,26 @@ static int open_db(const char *base, int flags) {
 
 /* ── daemon side ───────────────────────────────────────────────────────── */
 
-int walldb_open(const char *base) {
+int walldb_open(const char *path) {
     /* No busy timeout on purpose: SQLite would sleep, and the daemon's seccomp
      * filter doesn't allow that. A reload that races a writer just comes back empty. */
-    return open_db(base, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX);
+    return open_db(path, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX);
+}
+
+/* A setting of this library (view, current). 0 and *out filled, or -1 and *out untouched */
+int walldb_get_meta(const char *key, char *out, size_t outsz) {
+    sqlite3_stmt *st;
+    int rc = -1;
+    if (db && sqlite3_prepare_v2(db, "SELECT value FROM meta WHERE key = ?1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *v = (const char *)sqlite3_column_text(st, 0);
+            size_t n = v ? strlen(v) : 0;
+            if (v && n < outsz) { memcpy(out, v, n + 1); rc = 0; }
+        }
+        sqlite3_finalize(st);
+    }
+    return rc;
 }
 
 int walldb_set_purity(int p) {
@@ -162,6 +194,20 @@ int walldb_set_purity(int p) {
 }
 
 int walldb_get_purity(void) { return purity; }
+
+/* The category a wall is in ("" when it has none); -1 when the path is not in the database or it can't be read */
+int walldb_category(const char *path, char *out, size_t outsz) {
+    struct vec a = { 0 };
+    int found = run("SELECT category FROM wall WHERE path = ?2", path, &a) == 0 && a.n > 0 && outsz > 0;
+    if (found) {
+        size_t n = strlen(a.v[0]);
+        if (n >= outsz) n = outsz - 1;
+        memcpy(out, a.v[0], n);
+        out[n] = '\0';
+    }
+    vec_free(&a);
+    return found ? 0 : -1;
+}
 
 /* Number of walls in the view, or -1 when the database could not be read (*out is NULL then) */
 int walldb_list(const char *view, char ***out) {
@@ -179,7 +225,7 @@ int walldb_list(const char *view, char ***out) {
 int walldb_next_view(const char *cur, int dir, char *out, size_t outsz) {
     struct vec a = {0};
     /* only views with something to show: an empty one would just fall back to "*" and look like nothing happened */
-    if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE purity BETWEEN 1 AND ?1)", NULL) > 0) push(&a, "*");
+    if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE purity BETWEEN 1 AND ?1" NOT_HIDDEN ")", NULL) > 0) push(&a, "*");
     if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE purity <= ?1 AND (purity = 0 OR category = ''))", NULL) > 0) push(&a, "?");
     run(Q_VIEWS, NULL, &a);
 
@@ -198,8 +244,8 @@ int walldb_next_view(const char *cur, int dir, char *out, size_t outsz) {
 
 /* ── CLI side ──────────────────────────────────────────────────────────── */
 
-int walldb_open_rw(const char *base) {
-    if (open_db(base, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) < 0) return -1;
+int walldb_open_rw(const char *path) {
+    if (open_db(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) < 0) return -1;
     sqlite3_busy_timeout(db, 5000);
     if (sqlite3_exec(db, SCHEMA, NULL, NULL, NULL) != SQLITE_OK) {
         fprintf(stderr, "walldb: schema: %s\n", sqlite3_errmsg(db));
@@ -233,6 +279,16 @@ static int write_sql(const char *sql, const char *a, const char *b) {
     return rc;
 }
 
+void walldb_close(void) {
+    sqlite3_close(db);
+    db = NULL;
+}
+
+int walldb_set_meta(const char *key, const char *value) {
+    return write_sql("INSERT INTO meta(key, value) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                     key, value) >= 0 ? 0 : -1;
+}
+
 static int txn(const char *sql) {
     return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
 }
@@ -259,6 +315,7 @@ static int renumber(const char *cat) {
  * position and any category that is not dense is renumbered. Idempotent, and cheap when nothing is off.
  * Call inside a transaction. */
 static int normalize(void) {
+    if (write_sql("DELETE FROM cat_pref WHERE name NOT IN (SELECT category FROM wall WHERE category <> '')", "", NULL) < 0) return -1;
     if (write_sql("UPDATE wall SET pos = NULL WHERE category = '' AND pos IS NOT NULL", "", NULL) < 0) return -1;
     struct vec bad = {0};
     run("SELECT category FROM wall WHERE category <> '' GROUP BY category "
@@ -496,6 +553,58 @@ int walldb_clear_category(const char *cat) {
     return write_norm("UPDATE wall SET category = ?1 WHERE " IN_CAT, "", buf);
 }
 
+/* Move a category in the cycle of views ("12", "+3", "-2", "first", "last"). Every category gets a number the first
+ * time, so the order is exactly what --cats prints. Returns the new position, -1 on a bad request, -2 when no wall
+ * has that category. */
+int walldb_cat_move(const char *cat, const char *spec) {
+    char name[256];
+    if (clean_category(cat, name, sizeof(name)) < 0 || !name[0]) return -1;
+
+    struct vec a = {0};
+    int rc = -1;
+    if (txn("BEGIN") < 0) return -1;
+    if (run(Q_CATS, NULL, &a) == 0) {
+        int cur = 0, n = a.n;
+        for (int i = 0; i < n; i++)
+            if (!strcmp(a.v[i], name)) cur = i + 1;
+        if (cur == 0) rc = -2;
+        else {
+            int t = target_pos(spec, cur, n);
+            if (t >= 1) {
+                char *moved = a.v[cur - 1];                         /* take it out, put it in at t */
+                if (t < cur) memmove(&a.v[t], &a.v[t - 1], (size_t)(cur - t) * sizeof(*a.v));
+                else         memmove(&a.v[cur - 1], &a.v[cur], (size_t)(t - cur) * sizeof(*a.v));
+                a.v[t - 1] = moved;
+                int ok = 1;
+                for (int i = 0; ok && i < n; i++)
+                    ok = exec_i("INSERT INTO cat_pref(name, pos) VALUES(?1, ?2) "
+                                "ON CONFLICT(name) DO UPDATE SET pos = excluded.pos", a.v[i], i + 1, 0) >= 0;
+                rc = ok ? t : -1;
+            }
+        }
+    }
+    vec_free(&a);
+    if (rc < 0 || txn("COMMIT") < 0) {
+        int err = rc < 0 ? rc : -1;
+        txn("ROLLBACK");
+        return err;
+    }
+    return rc;
+}
+
+/* hide = 1: its walls leave "*", tags, random and the slideshow, and it leaves the cycle of views (its own view
+ * still opens by name). hide = 0: back as before. 0 on success, -1 on error, -2 when no wall has that category. */
+int walldb_cat_hide(const char *cat, int hide) {
+    char name[256];
+    if (clean_category(cat, name, sizeof(name)) < 0 || !name[0]) return -1;
+    if (scalar("SELECT EXISTS(SELECT 1 FROM wall WHERE category = ?2)", name) <= 0) return -2;
+    int ok = exec_i("INSERT INTO cat_pref(name, hidden) VALUES(?1, ?2) "
+                    "ON CONFLICT(name) DO UPDATE SET hidden = excluded.hidden", name, hide ? 1 : 0, 0) >= 0;
+    if (ok && !hide)                                                /* nothing left to remember about it */
+        exec_i("DELETE FROM cat_pref WHERE name = ?1 AND hidden = 0 AND pos IS NULL", name, 0, 0);
+    return ok ? 0 : -1;
+}
+
 /* ── listings for scripts: tab-separated, to stdout ────────────────────── */
 
 #define LIST_SELECT \
@@ -520,8 +629,9 @@ static int print_rows(const char *sql, const char *arg) {
 }
 
 int walldb_print_cats(void) {
-    return print_rows("SELECT category, count(*), sum(purity = 0) FROM wall WHERE category <> '' "
-                      "GROUP BY category ORDER BY category COLLATE NOCASE", NULL);
+    return print_rows("SELECT w.category, count(*), sum(w.purity = 0), COALESCE(p.hidden, 0) "
+                      "FROM wall w LEFT JOIN cat_pref p ON p.name = w.category WHERE w.category <> '' "
+                      "GROUP BY w.category ORDER BY (p.pos IS NULL), p.pos, w.category COLLATE NOCASE", NULL);
 }
 
 int walldb_print_walls(const char *view) {
@@ -596,6 +706,14 @@ static int scan_added, scan_skipped, scan_err;
 static struct { char folder[256]; size_t len; int level; } scan_tier[MAX_TIERS];
 static int scan_ntiers;
 
+/* the database itself and SQLite's side files, when it sits inside the folder being scanned */
+static int is_db_file(const char *name) {
+    size_t n = strlen(db_base);
+    if (n == 0 || strncmp(name, db_base, n) != 0) return 0;
+    const char *rest = name + n;
+    return !*rest || !strcmp(rest, "-journal") || !strcmp(rest, "-wal") || !strcmp(rest, "-shm");
+}
+
 static int is_image(const char *name) {
     const char *ext = strrchr(name, '.');
     return ext && (!strcasecmp(ext, ".jpg") || !strcasecmp(ext, ".png") || !strcasecmp(ext, ".jpeg") ||
@@ -654,9 +772,11 @@ static int visit(const char *fpath, const struct stat *sb, int type, struct FTW 
     const char *file = fpath + ftw->base;
     if (file[0] == '.' && ftw->level > 0) return type == FTW_D ? FTW_SKIP_SUBTREE : FTW_CONTINUE;
     if (type != FTW_F) return FTW_CONTINUE;
+    if (ftw->level == 1 && is_db_file(file)) return FTW_CONTINUE;      /* not a skipped file, just ours */
     if (!is_image(file)) { scan_skipped++; return FTW_CONTINUE; }
 
-    /* directory part below the root becomes the category: "Anime/Eva" */
+    /* the folder a file sits in is NOT its category: new files arrive uncategorised (the inbox, "?") and a
+     * category is only ever set by hand (--cat, --ct <cat> <folder>). The folder only matters for a tier. */
     const char *rel = fpath + scan_rootlen + (scan_rootlen > 1);   /* root "/" already ends in a slash */
     size_t dlen = (size_t)(file - rel);
     if (dlen) dlen--;                                           /* drop the trailing '/' */
@@ -665,14 +785,12 @@ static int visit(const char *fpath, const struct stat *sb, int type, struct FTW 
     memcpy(cat, rel, dlen);
     cat[dlen] = '\0';
 
-    /* a remembered "Folder=N" turns a tier folder into a purity instead of a category */
+    /* a remembered "Folder=N" gives the files in that folder (and below it) a purity */
     int p = 0;
-    const char *c = cat;
     for (int i = 0; i < scan_ntiers; i++) {
         size_t nl = scan_tier[i].len;
         if (dlen >= nl && !memcmp(cat, scan_tier[i].folder, nl) && (cat[nl] == '\0' || cat[nl] == '/')) {
             p = scan_tier[i].level;
-            c = cat + nl + (cat[nl] ? 1 : 0);
             break;
         }
     }
@@ -689,7 +807,7 @@ static int visit(const char *fpath, const struct stat *sb, int type, struct FTW 
     /* the statement outlives this call, so SQLite must copy these (they live on our stack / nftw's) */
     sqlite3_bind_text(ins, 1, rel,  -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(ins, 2, name, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(ins, 3, c,    -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(ins, 3, "",   -1, SQLITE_STATIC);
     sqlite3_bind_int (ins, 4, p);
     if (sqlite3_step(ins) == SQLITE_DONE) scan_added += sqlite3_changes(db);
     else scan_err = 1;

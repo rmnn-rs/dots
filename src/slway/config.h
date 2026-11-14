@@ -20,7 +20,7 @@ static struct arg args[] = {
 	{ ram_used,       "^c#88C0D0^ ^d^ %s ",                      NULL,                                        5, {0}, 0 },
 	{ ram_perc,       "^c#88C0D0^ ^d^ %s%% ^c#4C566A^  ^d^",    NULL,                                        5, {0}, 0 },
 	{ get_wall_info,  " %s ^c#4C566A^  ^d^",                     NULL,                                        0, {0}, 0 },
-	{ music_status,   "%s   ",                                   "nit",                                        1, {0}, 0 },
+	{ music_status,   "%s",                                      "nit",                                        1, {0}, 0 },
 
 
 };

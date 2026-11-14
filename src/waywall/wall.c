@@ -4,15 +4,15 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
-#include <libgen.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <wayland-client.h>
 #include <Imlib2.h>
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wall.h"
 #include "walldb.h"
+#include "config.h"
 
 int count = 0;
 int cur = 0;
@@ -38,6 +38,21 @@ static struct zwlr_layer_shell_v1 *layer_shell = NULL;
 static Output *outputs = NULL;
 static int ready = 0;   /* setup finished: new outputs map themselves */
 static int redraw = 0;  /* an output appeared or was resized */
+
+/* A path under the master dir must stay under it: no leading '/', no ".." component. (Symlinks inside the
+ * library are left alone on purpose: people link folders in.) The database never holds such a path, but
+ * the 'S' and 'J' commands take theirs from the socket. */
+static int safe_rel(const char *p) {
+    if (!p || !p[0] || p[0] == '/') return 0;
+    for (const char *c = p; *c; ) {
+        const char *e = strchr(c, '/');
+        size_t n = e ? (size_t)(e - c) : strlen(c);
+        if (n == 2 && c[0] == '.' && c[1] == '.') return 0;
+        if (!e) break;
+        c = e + 1;
+    }
+    return 1;
+}
 
 static size_t path_join(char *dest, size_t max, const char *p1, const char *p2, const char *p3) {
     size_t l1 = p1 ? strlen(p1) : 0;
@@ -203,20 +218,55 @@ static void output_present(Output *o, const void *pixels) {
     wl_surface_commit(o->surf);
 }
 
-const char *get_save_path(void) {
+/* The library, from config.h: master_dir (absolute, symlinks resolved) and the database inside it. Worked out
+ * once; NULL, with the reason on stderr, when the master dir is not a usable folder. */
+const char *get_db_path(void) {
     static char path[PATH_MAX];
-    if (path[0]) return path;
-    const char *home = getenv("HOME");
-    if (!home) return NULL;
+    static int state;                       /* 0 not yet, 1 ready, -1 failed (already reported) */
+    if (state) return state > 0 ? path : NULL;
+    state = -1;
 
-    size_t hlen = strlen(home);
-    const char *suffix = "/etc/wallman";
-    size_t slen = strlen(suffix);
-    if (hlen + slen >= PATH_MAX) return NULL;
+    char want[PATH_MAX], real[PATH_MAX];
+    size_t cl = strlen(master_dir_cfg), nl = strlen(db_name_cfg);
+    if (master_dir_cfg[0] == '~' && (master_dir_cfg[1] == '/' || master_dir_cfg[1] == '\0')) {
+        const char *home = getenv("HOME");
+        size_t hl = home ? strlen(home) : 0;
+        if (hl == 0 || hl + cl >= sizeof(want)) {
+            fputs("Error: master dir in config.h starts with ~ but $HOME is not usable\n", stderr);
+            return NULL;
+        }
+        memcpy(want, home, hl);
+        memcpy(want + hl, master_dir_cfg + 1, cl);          /* the rest, with its '\0' */
+    } else {
+        if (cl == 0 || cl >= sizeof(want)) {
+            fputs("Error: master dir in config.h is empty or too long\n", stderr);
+            return NULL;
+        }
+        memcpy(want, master_dir_cfg, cl + 1);
+    }
 
-    memcpy(path, home, hlen);
-    memcpy(path + hlen, suffix, slen + 1); /* +1 copies \0 */
+    struct stat sb;
+    if (!realpath(want, real) || stat(real, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+        fprintf(stderr, "Error: master dir %s (config.h) is not a folder\n", want);
+        return NULL;
+    }
+    size_t rl = strlen(real);
+    if (rl >= sizeof(master_dir) || nl == 0 || strchr(db_name_cfg, '/') || rl + 1 + nl >= sizeof(path)) {
+        fputs("Error: master dir or database name in config.h is empty, too long or has a '/'\n", stderr);
+        return NULL;
+    }
+    memcpy(master_dir, real, rl + 1);
+    if (!path_join(path, sizeof(path), real, db_name_cfg, NULL)) return NULL;
+    state = 1;
     return path;
+}
+
+/* Once, at daemon start and before the sandbox (the daemon itself only ever reads the database): make sure
+ * the database exists in the master dir with its tables, creating it when it is not there yet. */
+void wall_settings_init(void) {
+    const char *db = get_db_path();
+    if (!db || walldb_open_rw(db) < 0) exit(1);
+    walldb_close();
 }
 
 static void free_files(void) {
@@ -229,26 +279,22 @@ static void free_files(void) {
 
 /* walls in the view, -1 when the database could not be read (busy writer, missing file) */
 static int scan_and_fill(void) {
-    int n = walldb_open(get_save_path()) == 0 ? walldb_list(current_folder, &files) : -1;
+    int n = walldb_open(get_db_path()) == 0 ? walldb_list(current_folder, &files) : -1;
     count = n > 0 ? n : 0;
     return n;
 }
 
+static char pending[PATH_MAX];   /* the saved wall, until wall_restore() has put it on screen */
+
 static void wall_init(void) {
     if (files) return;
+    static int loaded;
     char want[PATH_MAX] = "";
-    const char *save = get_save_path();
-    if (master_dir[0] == '\0' && save) {
-        FILE *f = fopen(save, "r");
-        if (f) {
-            if (fgets(master_dir, sizeof(master_dir), f))
-                master_dir[strcspn(master_dir, "\n")] = 0;
-            if (fgets(current_folder, sizeof(current_folder), f))
-                current_folder[strcspn(current_folder, "\n")] = 0;
-            if (fgets(want, sizeof(want), f))
-                want[strcspn(want, "\n")] = 0;
-            fclose(f);
-        }
+    if (!loaded && walldb_open(get_db_path()) == 0) {                    /* the first time: the view and the wall on screen are in the database */
+        loaded = 1;
+        walldb_get_meta("view",    current_folder, sizeof(current_folder));
+        walldb_get_meta("current", want,           sizeof(want));
+        memcpy(pending, want, strlen(want) + 1);
     }
 
     if (scan_and_fill() == 0 && strcmp(current_folder, "*") != 0) { /* stale or emptied view: show everything */
@@ -274,7 +320,8 @@ static void run_setter(const char *filename) {
     redraw = 0;
 
     char fullpath[PATH_MAX];
-    if (!path_join(fullpath, sizeof(fullpath), master_dir, filename, NULL))
+    if (!safe_rel(filename) ||
+        !path_join(fullpath, sizeof(fullpath), master_dir, filename, NULL))
         return;
 
     Imlib_Image buffer = imlib_load_image(fullpath);
@@ -288,6 +335,10 @@ static void run_setter(const char *filename) {
     imlib_context_set_image(buffer);
     int imgW = imlib_image_get_width();
     int imgH = imlib_image_get_height();
+    if (imgW <= 0 || imgH <= 0) {                   /* the cover maths below divides by both */
+        imlib_free_image_and_decache();
+        return;
+    }
     imlib_context_set_blend(1);
 
     // One canvas per output, one layer surface per output
@@ -301,17 +352,20 @@ static void run_setter(const char *filename) {
         imlib_context_set_color(0, 0, 0, 255);
         imlib_image_fill_rectangle(0, 0, o->w, o->h);
 
+        /* "cover": scale until the image fills the monitor and cut off what overflows. Done on the source side
+         * (blend only the part that stays visible), so the scaled size is the monitor's and never more: a
+         * 1x30000 image scaled to cover a monitor is 57 million pixels tall, and Imlib2 crashes on that. */
         double aspect = (double)o->w / imgW;
-        if ((int)(imgH * aspect) < o->h)
+        if (imgH * aspect < o->h)
             aspect = (double)o->h / imgH;
+        int vw = (int)(o->w / aspect + 0.5), vh = (int)(o->h / aspect + 0.5);
+        if (vw < 1) vw = 1;
+        if (vw > imgW) vw = imgW;
+        if (vh < 1) vh = 1;
+        if (vh > imgH) vh = imgH;
 
-        int scaledW = (int)(imgW * aspect);
-        int scaledH = (int)(imgH * aspect);
-        int left = (o->w - scaledW) / 2;
-        int top  = (o->h - scaledH) / 2;
-
-        imlib_blend_image_onto_image(buffer, 0, 0, 0, imgW, imgH,
-                                     left, top, scaledW, scaledH);
+        imlib_blend_image_onto_image(buffer, 0, (imgW - vw) / 2, (imgH - vh) / 2, vw, vh,
+                                     0, 0, o->w, o->h);
 
         output_present(o, imlib_image_get_data_for_reading_only());
         imlib_free_image_and_decache();
@@ -379,46 +433,26 @@ void wall_cycle(const void *arg) {
     run_setter(files[cur]);
 }
 
-void wall_restore(void) {
+/* Open the database and read the view without drawing anything. The daemon calls it before its sandbox goes
+ * on: SQLite's open-time syscalls (readlink, access, ...) are not in the seccomp filter, and the handle it
+ * opens here is the one every later reload reuses. */
+void wall_prepare(void) {
     wall_init();
-    if (count > 0) run_setter(files[cur]);
 }
 
-void wall_save(const void *arg) {
-    (void)arg;
-
-    const char *save = get_save_path();
-    if (count == 0 || master_dir[0] == '\0' || !save) return;
-
-    char temp_path[PATH_MAX];
-    size_t slen = strlen(save);
-    if (slen + 5 >= PATH_MAX) return;
-    memcpy(temp_path, save, slen);
-    memcpy(temp_path + slen, ".tmp", 5);
-
-    FILE *f = fopen(temp_path, "w");
-    if (!f) return;
-
-    if (fprintf(f, "%s\n%s\n%s\n", master_dir, current_folder, files[cur]) < 0) goto cleanup;
-    if (fflush(f) != 0) goto cleanup;
-
-    int fd = fileno(f);
-    if (fd == -1 || fsync(fd) != 0) goto cleanup;
-    if (fclose(f) != 0) { unlink(temp_path); return; }
-    f = NULL;
-
-    if (rename(temp_path, save) != 0) { unlink(temp_path); return; }
-
-    char dirbuf[PATH_MAX];
-    memcpy(dirbuf, save, slen + 1);
-    char *dir = dirname(dirbuf);
-    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd >= 0) { fsync(dfd); close(dfd); }
-    return;
-
-cleanup:
-    if (f) fclose(f);
-    unlink(temp_path);
+void wall_restore(void) {
+    wall_init();
+    if (pending[0]) {
+        char want[PATH_MAX];
+        memcpy(want, pending, strlen(pending) + 1);
+        pending[0] = '\0';
+        if (count > 0 && strcmp(files[cur], want) == 0) { run_setter(files[cur]); return; }
+        /* The saved wall is not in the saved view any more (it was categorized or rated after saving): go to
+         * the view it is in now, at its index there. */
+        wall_jump(want);
+        if (strcmp(shown, want) == 0) return;       /* drew it; if the file is gone, fall through */
+    }
+    if (count > 0) run_setter(files[cur]);
 }
 
 void wall_random(const void *arg) {
@@ -467,14 +501,17 @@ const char *wall_current(void) {
     return shown[0] ? shown : NULL;
 }
 
-/* Make a library file (path relative to the master dir) the current wallpaper. Stays in the
- * current view when it's there, otherwise tries the inbox, then everything. */
+/* Make a library file (path relative to the master dir) the current wallpaper, and put the lists where it
+ * really is: the current view when it's in it, otherwise its own category (the inbox when it has none),
+ * then everything. cur ends up on its index in that view. */
 void wall_jump(const char *path) {
     if (!path || !path[0]) return;
     char keep[sizeof(current_folder)];
     memcpy(keep, current_folder, sizeof(keep));
 
-    const char *tries[] = { keep, "?", "*" };
+    char own[256] = "";                                 /* its category, "" for none */
+    walldb_category(path, own, sizeof(own));
+    const char *tries[] = { keep, own[0] ? own : "?", "*" };
     for (int t = 0; t < 3; t++) {
         size_t n = strlen(tries[t]);
         memcpy(current_folder, tries[t], n + 1);

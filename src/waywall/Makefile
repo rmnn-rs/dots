@@ -1,6 +1,6 @@
-CC = gcc
+CC = cc
 PKGS = imlib2 wayland-client
-CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -O3 -Wall -Wextra $(shell pkg-config --cflags $(PKGS))
+CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -Os -Wall -Wextra $(shell pkg-config --cflags $(PKGS))
 LIBS = $(shell pkg-config --libs $(PKGS)) -lsqlite3
 
 # Protocol XMLs: layer-shell is vendored in this directory (same protocol on wlroots and
@@ -14,6 +14,7 @@ GEN_C = wlr-layer-shell-unstable-v1-protocol.c xdg-shell-protocol.c
 TARGET = waywall
 SRC = wallman.c wall.c walldb.c wallwatch.c $(GEN_C)
 OBJ = $(SRC:.c=.o)
+HDR = wall.h walldb.h wallwatch.h config.h
 
 all: $(TARGET)
 
@@ -30,7 +31,7 @@ xdg-shell-protocol.c: $(XDG_XML)
 wall.o: $(GEN_H)
 
 # Generic rule to compile .c files into .o files
-%.o: %.c
+%.o: %.c $(HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link the target - CRITICAL: $(LIBS) must be at the end

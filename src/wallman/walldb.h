@@ -18,8 +18,12 @@
 int  walldb_open(const char *base);              /* 0 on success, safe to repeat */
 int  walldb_set_purity(int p);                   /* max purity shown 1..3, starts at 1; -1 if out of range */
 int  walldb_get_purity(void);
+int  walldb_category(const char *path, char *out, size_t outsz); /* the wall's category ("" none); -1 when unknown */
 int  walldb_list(const char *view, char ***out); /* paths in view, <= 10000; caller frees; returns count */
 int  walldb_next_view(const char *cur, int dir, char *out, size_t outsz); /* "*", "?", then categories; wraps */
+void walldb_close(void);
+int walldb_get_meta(const char *key, char *out, size_t outsz);
+int walldb_set_meta(const char *key, const char *value);
 
 /* ── CLI side (read-write, creates the schema on first use) ────────────── */
 
@@ -39,7 +43,11 @@ int  walldb_set_category_folder(const char *folder, const char *cat, int level, 
 int  walldb_clear_category(const char *cat);                  /* remove a category from every wallpaper that has it; rows changed */
 int  walldb_unrated(const char *cat);                         /* unrated rows in a category (NULL = whole library) */
 int  walldb_exists(const char *path);                        /* is this relative path in the database? */
-int  walldb_print_cats(void);                               /* "category<TAB>total<TAB>unrated" per category; returns rows, -1 on error */
+int  walldb_print_cats(void);                               /* "category<TAB>total<TAB>unrated<TAB>hidden" per category, in cycle order; returns rows, -1 on error */
+int  walldb_cat_move(const char *cat, const char *spec);    /* move a category in the cycle of views: "12", "+3", "-2", "first", "last".
+                                                               Returns the new position, -1 on a bad request, -2 when no wall has it */
+int  walldb_cat_hide(const char *cat, int hide);            /* 1: its walls leave "*", tags, random and the slideshow, and it leaves the cycle
+                                                               (its own view still opens by name); 0: back. -2 when no wall has it */
 int  walldb_print_walls(const char *view);                  /* "path<TAB>purity<TAB>category<TAB>name<TAB>tags" for a view ("*" = all, ignores the allowed purity) */
 int  walldb_total(void);                                    /* rows in the library */
 int  walldb_rename(const char *from, const char *to);       /* a file or folder moved: its rows follow (tags and ratings too) */

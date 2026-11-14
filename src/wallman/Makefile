@@ -1,16 +1,17 @@
 CC = gcc
 # Added -D_GNU_SOURCE to ensure all system features are available
-CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -O3 -Wall -Wextra -Werror $(shell pkg-config --cflags imlib2 x11 xinerama)
+CFLAGS = -fPIE -pie -Wl,-z,relro,-z,now -fstack-protector-strong -march=native -flto -Os -Wall -Wextra -Werror $(shell pkg-config --cflags imlib2 x11 xinerama)
 LIBS = $(shell pkg-config --libs imlib2 x11 xinerama) -lXext -lXrandr -lsqlite3
 
 TARGET = wallman
 SRC = wallman.c wall.c walldb.c wallwatch.c
 OBJ = $(SRC:.c=.o)
+HDR = wall.h walldb.h wallwatch.h config.h
 
 all: $(TARGET)
 
 # Generic rule to compile .c files into .o files
-%.o: %.c
+%.o: %.c $(HDR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link the target - CRITICAL: $(LIBS) must be at the end

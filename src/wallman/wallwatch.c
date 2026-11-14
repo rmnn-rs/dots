@@ -21,9 +21,12 @@ struct wd { int wd; char *rel; };        /* a watched directory; rel is relative
 struct mv { unsigned cookie; char *rel; };
 struct rn { char *from, *to; };
 
-static char root[PATH_MAX], dbbase[PATH_MAX];
+static char root[PATH_MAX], dbpath[PATH_MAX];            /* root: the master dir; dbbase: the database's file name, which lives in it */
+static char dbbase[256];
+static size_t dbbaselen;
 static size_t rootlen;
-static int ifd = -1, dirty, rewatch_needed, warned_limit, warned_empty;
+static int ifd = -1;
+static int dirty, rewatch_needed, warned_limit, warned_empty;
 static struct wd *wds;     static int nwds, wdcap;
 static struct mv *moves;   static int nmoves, movecap;       /* MOVED_FROM events still waiting for their MOVED_TO */
 static struct rn *renames; static int nrenames, renamecap;
@@ -72,7 +75,16 @@ static void rewatch(void) {
     nwds = 0;
     ifd = inotify_init1(IN_CLOEXEC);
     if (ifd < 0) { perror("wallwatch: inotify_init1"); _exit(1); }
-    nftw(root, add_dir, 16, FTW_ACTIONRETVAL);
+    if (root[0]) nftw(root, add_dir, 16, FTW_ACTIONRETVAL);
+}
+
+/* The database sits in the master dir, so its own writes (and SQLite's -journal / -wal / -shm beside it)
+ * show up as events there. They are not changes to the library: reacting to them would loop forever,
+ * because every scan writes the database. */
+static int is_db_file(const char *name) {
+    if (strncmp(name, dbbase, dbbaselen) != 0) return 0;
+    const char *rest = name + dbbaselen;
+    return !*rest || !strcmp(rest, "-journal") || !strcmp(rest, "-wal") || !strcmp(rest, "-shm");
 }
 
 static const char *dir_of(int wd) {
@@ -98,10 +110,11 @@ static void on_event(const struct inotify_event *e) {
     if (e->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF)) { dirty = rewatch_needed = 1; return; }
     if (e->len == 0 || e->name[0] == '.') return;                             /* hidden: scan skips those too (.wallman-temp) */
 
+    const char *dir = dir_of(e->wd);
+    if (dir && !dir[0] && is_db_file(e->name)) return;                        /* our own database, in the root */
+
     dirty = 1;
     if (e->mask & IN_ISDIR) rewatch_needed = 1;
-
-    const char *dir = dir_of(e->wd);
     if (!dir) return;
     if (e->mask & IN_MOVED_FROM) {
         moves = grow(moves, nmoves, &movecap, sizeof(*moves));
@@ -124,7 +137,7 @@ static void on_event(const struct inotify_event *e) {
 static void process_batch(void (*notify)(void)) {
     if (rewatch_needed) { rewatch(); rewatch_needed = 0; }       /* before scanning, so files in a brand-new folder aren't missed */
 
-    if (walldb_open_rw(dbbase) == 0) {
+    if (walldb_open_rw(dbpath) == 0 && root[0]) {
         if (walldb_total() > 0) {
             for (int i = 0; i < nrenames; i++) walldb_rename(renames[i].from, renames[i].to);
             walldb_scan(root, NULL, 0, NULL);
@@ -164,11 +177,9 @@ static void loop(void (*notify)(void)) {
     }
 }
 
-pid_t wallwatch_start(const char *root_in, const char *db_base, void (*notify)(void)) {
-    size_t n = root_in ? strlen(root_in) : 0;
-    size_t bl = db_base ? strlen(db_base) : 0;
-    while (n > 1 && root_in[n - 1] == '/') n--;
-    if (n == 0 || n >= sizeof(root) || bl == 0 || bl >= sizeof(dbbase)) return -1;
+pid_t wallwatch_start(const char *master, const char *db_path, void (*notify)(void)) {
+    size_t ml = master ? strlen(master) : 0, bl = db_path ? strlen(db_path) : 0;
+    if (ml == 0 || ml >= sizeof(root) || bl == 0 || bl >= sizeof(dbpath)) return -1;
 
     pid_t parent = getpid();
     pid_t pid = fork();
@@ -183,15 +194,19 @@ pid_t wallwatch_start(const char *root_in, const char *db_base, void (*notify)(v
     syscall(SYS_close_range, 3, ~0U, 0);                         /* the daemon's socket, X connection, database... */
     walldb_forget();                                             /* and its inherited SQLite handle */
 
-    memcpy(root, root_in, n);
-    root[n] = '\0';
-    rootlen = n;
-    memcpy(dbbase, db_base, bl + 1);
+    memcpy(dbpath, db_path, bl + 1);
+    memcpy(root, master, ml + 1);
+    while (ml > 1 && root[ml - 1] == '/') root[--ml] = '\0';
+    rootlen = ml;
+    const char *base = strrchr(dbpath, '/');
+    base = base ? base + 1 : dbpath;
+    dbbaselen = strlen(base);
+    if (dbbaselen >= sizeof(dbbase)) dbbaselen = sizeof(dbbase) - 1;
+    memcpy(dbbase, base, dbbaselen);
+    dbbase[dbbaselen] = '\0';
 
-    char dbfile[PATH_MAX + 4];                                   /* an old database gets its positions numbered right away */
-    memcpy(dbfile, dbbase, bl);
-    memcpy(dbfile + bl, ".db", 4);
-    if (access(dbfile, F_OK) == 0) walldb_open_rw(dbbase);
+    walldb_open_rw(dbpath);                                      /* an old database gets its positions numbered right away */
+    dirty = rewatch_needed = 0;                                  /* nothing to catch up on at start */
 
     rewatch();
     loop(notify);
