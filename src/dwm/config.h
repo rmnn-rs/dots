@@ -167,7 +167,7 @@ static const Key keys[] = {
 
 	{ 0,                       XF86XK_Tools,    spawn, {.v = (const char*[]){"lxappearance", NULL} } },
 	{ 0,                       XF86XK_Explorer, spawn, {.v = (const char*[]){ TERMINAL, "sudo", "slmount", NULL } } },
-	{ 0,                       XK_Print,        spawn, {.v = (const char*[]){ "/bin/sh", "-c", "maim \"$HOME/Pictures/$(date +%s).png\"", NULL } } },
+	{ 0,                       XK_Print,        spawn, {.v = (const char*[]){ "/bin/sh", "-c", "maim \"$HOME/Pictures/Screenshots/$(date +%s).png\"", NULL } } },
 	{ 0,                       XF86XK_Search,   spawn, {.v = (const char*[]){ TERMINAL, "iwctl", NULL } } },
 	{ 0,                       XF86XK_Display,  spawn, {.v = (const char*[]){ "arandr", NULL } } },
 	{ 0,                       XF86XK_LaunchA,  spawn, {.v = (const char*[]){ "thunderbird", NULL } } },
