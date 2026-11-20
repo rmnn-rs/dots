@@ -44,7 +44,6 @@ static struct zwlr_layer_shell_v1 *layer_shell = NULL;
 static Output *outputs = NULL;
 static int ready = 0;   /* setup finished: new outputs map themselves */
 static int redraw = 0;  /* an output appeared or was resized */
-//static Imlib_Image current_imlib_image = NULL;
 
 static size_t path_join(char *dest, size_t max, const char *p1, const char *p2, const char *p3) {
     size_t l1 = p1 ? strlen(p1) : 0;
@@ -207,24 +206,6 @@ static void output_present(Output *o, const void *pixels) {
     wl_surface_damage(o->surf, 0, 0, o->w, o->h);
     wl_surface_commit(o->surf);
 }
-
-/*static void prefetch_neighbors(void) {
-    if (count < 2) return;
-    int neighbors[2] = { (cur - 1 + count) % count, (cur + 1) % count };
-
-    for (int i = 0; i < 2; i++) {
-        char path[PATH_MAX];
-        if (path_join(path, sizeof(path), master_dir, current_folder, files[neighbors[i]])) {
-            Imlib_Image img = imlib_load_image(path);
-            if (img) {
-                imlib_context_set_image(img);
-                imlib_free_image(); // Remains in Imlib2's 32MB cache
-            }
-        }
-    }
-}*/
-
-
 
 const char *get_save_path(void) {
     static char path[PATH_MAX];

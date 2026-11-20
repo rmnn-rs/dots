@@ -1,9 +1,21 @@
 CC      = gcc
-CFLAGS  = -O3 -march=native -Wall -Werror `pkg-config --cflags libnotify`
-LIBS    = -lasound `pkg-config --libs libnotify`
+CFLAGS  = -O3 -march=native -Wall -Werror
+LIBS    = -lasound
 PREFIX  = /usr/local
 SRC     = volume.c
 OBJ     = volume
+
+# Desktop notifications need libnotify.  Build without them: make NOTIFY=0
+NOTIFY ?= 1
+ifeq ($(NOTIFY),1)
+CFLAGS += -DHAVE_NOTIFY $(shell pkg-config --cflags libnotify)
+LIBS   += $(shell pkg-config --libs libnotify)
+endif
+
+# Compile a different default sound card in:  make CARD=hw:0
+ifdef CARD
+CFLAGS += -DDEFAULT_CARD='"$(CARD)"'
+endif
 
 all: $(OBJ)
 

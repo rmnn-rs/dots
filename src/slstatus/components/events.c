@@ -1,9 +1,11 @@
 /* See LICENSE file for copyright and license details. */
 #define _GNU_SOURCE /* memmem */
+#include <alsa/asoundlib.h>
 #include <errno.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <mpd/client.h>
+#include <poll.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -224,5 +226,85 @@ ev_mpd_drain(int fd)
 		return evmpd_fail();
 
 	return 1;
+}
+
+/* ---- ALSA mixer ------------------------------------------------------- */
+
+#define EVVOL_CARD "hw:1" /* keep in sync with components/volume.c */
+
+static snd_mixer_t *evvol;
+static int evvol_hit;
+
+static int
+evvol_fail(void)
+{
+	if (evvol)
+		snd_mixer_close(evvol); /* closes the fd */
+	evvol = NULL;
+
+	return -1;
+}
+
+/* runs inside snd_mixer_handle_events(), once per event on "Master" or "Capture" */
+static int
+evvol_cb(snd_mixer_elem_t *elem, unsigned int mask)
+{
+	(void)elem;
+	if (mask & SND_CTL_EVENT_MASK_VALUE) /* volume or mute switch */
+		evvol_hit = 1;
+
+	return 0;
+}
+
+/* silent on failure like MPD: card not there yet is normal, main loop retries */
+int
+ev_vol_init(void)
+{
+	snd_mixer_t *h;
+	snd_mixer_selem_id_t *sid;
+	snd_mixer_elem_t *elem;
+	struct pollfd pfd;
+
+	if (snd_mixer_open(&h, 0) < 0)
+		return -1;
+	if (snd_mixer_attach(h, EVVOL_CARD) < 0 ||
+	    snd_mixer_selem_register(h, NULL, NULL) < 0 ||
+	    snd_mixer_load(h) < 0)
+		goto fail;
+
+	snd_mixer_selem_id_alloca(&sid);
+	snd_mixer_selem_id_set_name(sid, "Master");
+	if (!(elem = snd_mixer_find_selem(h, sid)) ||
+	    snd_mixer_poll_descriptors(h, &pfd, 1) < 1)
+		goto fail;
+	snd_mixer_elem_set_callback(elem, evvol_cb);
+
+	/* the mic (I/V/B letters) is optional: not every card has one */
+	snd_mixer_selem_id_set_name(sid, "Capture");
+	if ((elem = snd_mixer_find_selem(h, sid)))
+		snd_mixer_elem_set_callback(elem, evvol_cb);
+
+	evvol = h;
+
+	return pfd.fd;
+fail:
+	snd_mixer_close(h);
+
+	return -1;
+}
+
+int
+ev_vol_drain(int fd)
+{
+	(void)fd;
+
+	/* handles every queued event; only Master's and Capture's land in
+	 * evvol_cb, so anything else (jack sensing, boost, ...) returns 0 and
+	 * costs no redraw */
+	evvol_hit = 0;
+	if (snd_mixer_handle_events(evvol) < 0)
+		return evvol_fail();
+
+	return evvol_hit;
 }
 

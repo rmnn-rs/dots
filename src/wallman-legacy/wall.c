@@ -29,7 +29,6 @@ static int capacity = 0;
 /* Internal Renderer State */
 static Display *display = NULL;
 static int screen;
-//static Imlib_Image current_imlib_image = NULL;
 static Pixmap last_pixmap = None;
 
 static size_t path_join(char *dest, size_t max, const char *p1, const char *p2, const char *p3) {
@@ -49,7 +48,6 @@ static size_t path_join(char *dest, size_t max, const char *p1, const char *p2, 
     return total;
 }
 
-/* Initialize X11 and Imlib once */
 void wall_setup_renderer(void) {
     if (display) return;
     display = XOpenDisplay(NULL);
@@ -59,27 +57,8 @@ void wall_setup_renderer(void) {
     imlib_context_set_display(display);
     imlib_context_set_visual(DefaultVisual(display, screen));
     imlib_context_set_colormap(DefaultColormap(display, screen));
-//    imlib_set_cache_size(64 * 1024 * 1024);
     imlib_set_cache_size(0);
 }
-
-/*static void prefetch_neighbors(void) {
-    if (count < 2) return;
-    int neighbors[2] = { (cur - 1 + count) % count, (cur + 1) % count };
-
-    for (int i = 0; i < 2; i++) {
-        char path[PATH_MAX];
-        if (path_join(path, sizeof(path), master_dir, current_folder, files[neighbors[i]])) {
-            Imlib_Image img = imlib_load_image(path);
-            if (img) {
-                imlib_context_set_image(img);
-                imlib_free_image(); // Remains in Imlib2's 32MB cache
-            }
-        }
-    }
-}*/
-
-
 
 const char *get_save_path(void) {
     static char path[PATH_MAX];

@@ -4,6 +4,7 @@
 const char *battery_perc(const char *);
 const char *battery_remaining(const char *);
 const char *battery_state(const char *);
+const char *battery_status(const char *);
 
 /* cat */
 const char *cat(const char *path);
@@ -95,4 +96,8 @@ int ev_uevent_init(void); int ev_uevent_drain(int fd);
 int ev_link_init(void);   int ev_link_drain(int fd);
 int ev_mpd_init(void);    int ev_mpd_drain(int fd);
 int ev_wall_init(void);    int ev_wall_drain(int fd);
+
+
+int ev_vol_init(void);
+int ev_vol_drain(int fd);
 
